@@ -1,4 +1,64 @@
-![ariel-header](./docs/resources/ariel_header.svg)
+# Team Git Workflow
+
+This document explains how our group works with GitHub and the teacher’s repository.  
+- Teacher’s repo = **upstream** → branch: `main`  
+- Our team base = **origin** → branch: `main-group20`  
+- Personal branches = `roos-group20`, `laura-group20`, etc.  
+
+---
+
+## 0) One-time setup: clone the team repo
+
+Clone the team repository:
+
+````
+git clone https://github.com/rjvandel14/group20-Assignment3.git
+cd group20-Assignment3
+````
+
+Add the teacher’s repo as **upstream** (read-only):
+```
+git remote add upstream https://github.com/ci-group/ariel.git
+
+git remote -v   # should show: origin = our fork, upstream = teacher
+```
+---
+
+## 1) Create your personal branch (from the team base)
+
+Do this once per person:
+```
+git fetch origin
+git checkout -b <yourname>-group20 origin/main-group20
+git push -u origin <yourname>-group20
+```
+Examples:
+```
+git checkout -b roos-group20 origin/main-group20
+git push -u origin roos-group20
+````
+---
+## 2) When the teacher updates `upstream/main`
+
+Keep the team base up to date, then rebase your branch.
+
+A) Update team base `main-group20`:
+```
+git fetch upstream
+git switch main-group20
+git merge --ff-only upstream/main || git rebase upstream/main
+git push
+```` 
+B) Rebase your personal branch on the updated base:
+```
+git switch <yourname>-group20
+git rebase main-group20
+# If conflicts: resolve → git add <files> → git rebase --continue
+git push --force-with-lease
+```
+
+
+
 
 # ARIEL: Autonomous Robots through Integrated Evolution and Learning
 
