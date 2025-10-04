@@ -48,9 +48,9 @@ SCRIPT_NAME = __file__.split("/")[-1][:-3]
 CWD = Path.cwd()
 DATA = CWD / "__data__" / SCRIPT_NAME
 DATA.mkdir(exist_ok=True)
-SPAWN_POS = [-0.8, 0, 0.1]
-
+SPAWN_POS = [0.0, 0.0, 0.1]
 HISTORY = []
+
 
 def show_xpos_history(history: list[float]) -> None:
     # Create a tracking camera
@@ -113,9 +113,10 @@ def show_xpos_history(history: list[float]) -> None:
 
     # Title
     plt.title("Robot Path in XY Plane")
-    print("show plot")
+
     # Show results
     plt.show()
+
 
 
 def random_move(
@@ -179,8 +180,8 @@ def evaluate(weights,robot_graph):
     world = OlympicArena()
     mj.set_mjcb_control(None)
     robot = construct_mjspec_from_graph(robot_graph)
-    robot= gecko()
-    world.spawn(robot.spec, spawn_position=SPAWN_POS)
+    #robot= gecko()
+    world.spawn(robot.spec, spawn_position=[0, 0, 0.1])
 
     model = world.spec.compile()
     data = mj.MjData(model)
@@ -224,7 +225,7 @@ def experiment(robot_graph: Any, mode: ViewerTypes = "viewer") -> np.ndarray:
     mj.set_mjcb_control(None)  # DO NOT REMOVE
     robot = construct_mjspec_from_graph(robot_graph)
     # Create world and spawn robot
-    robot=gecko()
+    # robot=gecko()
     world = OlympicArena()
     world.spawn(robot.spec, spawn_position=[0, 0, 0.1])
 
@@ -243,7 +244,7 @@ def experiment(robot_graph: Any, mode: ViewerTypes = "viewer") -> np.ndarray:
     # Nevergrad optimizer
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
-    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=2000)
+    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=200)
 
     # Objective function
     def objective(x):
@@ -275,7 +276,7 @@ def main() -> None:
     )
     save_graph_as_json(robot_graph, DATA / "robot_graph.json")
     core = construct_mjspec_from_graph(robot_graph)
-    core = gecko()
+    # core = gecko()
     # Clear old history
     HISTORY.clear()
 
@@ -284,7 +285,7 @@ def main() -> None:
 
     # Create world and spawn robot for simulation
     world = OlympicArena()
-    world.spawn(core.spec, spawn_position=SPAWN_POS)
+    world.spawn(core.spec, spawn_position=[0, 0, 0.1])
     model = world.spec.compile()
     data = mj.MjData(model)
     #core = construct_mjspec_from_graph(robot_graph)  # rebuild before reuse
@@ -292,6 +293,8 @@ def main() -> None:
     geoms = world.spec.worldbody.find_all(mj.mjtObj.mjOBJ_GEOM)
     to_track = [data.bind(geom) for geom in geoms if "core" in geom.name]
 
+    # Tracker
+    # tracker = Tracker(mujoco_obj_to_find=mj.mjtObj.mjOBJ_GEOM, name_to_bind="core")
 
     # Neural controller
     input_size = len(data.qpos) + len(data.qvel) + 2
