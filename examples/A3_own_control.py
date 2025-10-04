@@ -139,7 +139,7 @@ def evaluate(weights,robot_graph):
     world = OlympicArena()
     mj.set_mjcb_control(None)
     robot = construct_mjspec_from_graph(robot_graph)
-    robot= gecko()
+    #robot= gecko()
     world.spawn(robot.spec, spawn_position=[0, 0, 0.1])
 
     model = world.spec.compile()
@@ -174,7 +174,7 @@ def fitness(to_track, joint_history):
 
     saturation_penalty = np.mean(np.abs(np.abs(joint_history) - (np.pi / 2))) # to avoid getting stuck on max or min joint angles
 
-    fitness = displacement_x + 0.08 * oscillation_reward - 0.08 * saturation_penalty #- 0.3*displacement_y
+    fitness = displacement_x + 0.08 * oscillation_reward - 0.08 * saturation_penalty - 0.3*displacement_y
 
     return fitness
 
@@ -184,7 +184,7 @@ def experiment(robot_graph: Any, mode: ViewerTypes = "viewer") -> np.ndarray:
     mj.set_mjcb_control(None)  # DO NOT REMOVE
     robot = construct_mjspec_from_graph(robot_graph)
     # Create world and spawn robot
-    robot=gecko()
+    # robot=gecko()
     world = OlympicArena()
     world.spawn(robot.spec, spawn_position=[0, 0, 0.1])
 
@@ -214,55 +214,6 @@ def experiment(robot_graph: Any, mode: ViewerTypes = "viewer") -> np.ndarray:
     print("Best fitness:", -objective(recommendation.value))
     return recommendation.value
 
-    # Set the control callback function
-    # This is called every time step to get the next action.
-    args: list[Any] = []  # IF YOU NEED MORE ARGUMENTS ADD THEM HERE!
-    kwargs: dict[Any, Any] = {}  # IF YOU NEED MORE ARGUMENTS ADD THEM HERE!
-
-    mj.set_mjcb_control(
-        lambda m, d: controller.set_control(m, d, *args, **kwargs),
-    )
-
-    # ------------------------------------------------------------------ #
-    match mode:
-        case "simple":
-            # This disables visualisation (fastest option)
-            simple_runner(
-                model,
-                data,
-                duration=duration,
-            )
-        case "frame":
-            # Render a single frame (for debugging)
-            save_path = str(DATA / "robot.png")
-            single_frame_renderer(model, data, save=True, save_path=save_path)
-        case "video":
-            # This records a video of the simulation
-            path_to_video_folder = str(DATA / "videos")
-            video_recorder = VideoRecorder(output_folder=path_to_video_folder)
-
-            # Render with video recorder
-            video_renderer(
-                model,
-                data,
-                duration=duration,
-                video_recorder=video_recorder,
-            )
-        case "launcher":
-            # This opens a liver viewer of the simulation
-            viewer.launch(
-                model=model,
-                data=data,
-            )
-        case "no_control":
-            # If mj.set_mjcb_control(None), you can control the limbs manually.
-            mj.set_mjcb_control(None)
-            viewer.launch(
-                model=model,
-                data=data,
-            )
-    # ==================================================================== #
-
 
 def main() -> None:
     """Entry point."""
@@ -284,7 +235,7 @@ def main() -> None:
     )
     save_graph_as_json(robot_graph, DATA / "robot_graph.json")
     core = construct_mjspec_from_graph(robot_graph)
-    core = gecko()
+    # core = gecko()
     # Clear old history
     HISTORY.clear()
 
@@ -302,7 +253,7 @@ def main() -> None:
     to_track = [data.bind(geom) for geom in geoms if "core" in geom.name]
 
     # Tracker
-    tracker = Tracker(mujoco_obj_to_find=mj.mjtObj.mjOBJ_GEOM, name_to_bind="core")
+    # tracker = Tracker(mujoco_obj_to_find=mj.mjtObj.mjOBJ_GEOM, name_to_bind="core")
 
     # Neural controller
     input_size = len(data.qpos) + len(data.qvel) + 2
