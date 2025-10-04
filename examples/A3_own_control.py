@@ -48,32 +48,72 @@ SCRIPT_NAME = __file__.split("/")[-1][:-3]
 CWD = Path.cwd()
 DATA = CWD / "__data__" / SCRIPT_NAME
 DATA.mkdir(exist_ok=True)
+SPAWN_POS = [-0.8, 0, 0.1]
 
 HISTORY = []
 
 def show_xpos_history(history: list[float]) -> None:
+    # Create a tracking camera
+    camera = mj.MjvCamera()
+    camera.type = mj.mjtCamera.mjCAMERA_FREE
+    camera.lookat = [2.5, 0, 0]
+    camera.distance = 10
+    camera.azimuth = 0
+    camera.elevation = -90
+
+    # Initialize world to get the background
+    mj.set_mjcb_control(None)
+    world = OlympicArena()
+    model = world.spec.compile()
+    data = mj.MjData(model)
+    save_path = str(DATA / "background.png")
+    single_frame_renderer(
+        model,
+        data,
+        camera=camera,
+        save_path=save_path,
+        save=True,
+    )
+
+    # Setup background image
+    img = plt.imread(save_path)
+    _, ax = plt.subplots()
+    ax.imshow(img)
+    w, h, _ = img.shape
+
     # Convert list of [x,y,z] positions to numpy array
     pos_data = np.array(history)
 
-    # Create figure and axis
-    plt.figure(figsize=(10, 6))
+    # Calculate initial position
+    x0, y0 = int(h * 0.483), int(w * 0.815)
+    xc, yc = int(h * 0.483), int(w * 0.9205)
+    ym0, ymc = 0, SPAWN_POS[0]
+
+    # Convert position data to pixel coordinates
+    pixel_to_dist = -((ymc - ym0) / (yc - y0))
+    pos_data_pixel = [[xc, yc]]
+    for i in range(len(pos_data) - 1):
+        xi, yi, _ = pos_data[i]
+        xj, yj, _ = pos_data[i + 1]
+        xd, yd = (xj - xi) / pixel_to_dist, (yj - yi) / pixel_to_dist
+        xn, yn = pos_data_pixel[i]
+        pos_data_pixel.append([xn + int(xd), yn + int(yd)])
+    pos_data_pixel = np.array(pos_data_pixel)
 
     # Plot x,y trajectory
-    plt.plot(pos_data[:, 0], pos_data[:, 1], "b-", label="Path")
-    plt.plot(pos_data[0, 0], pos_data[0, 1], "go", label="Start")
-    plt.plot(pos_data[-1, 0], pos_data[-1, 1], "ro", label="End")
-    plt.plot(0, 0, "kx", label="Origin")
+    ax.plot(x0, y0, "kx", label="[0, 0, 0]")
+    ax.plot(xc, yc, "go", label="Start")
+    ax.plot(pos_data_pixel[:, 0], pos_data_pixel[:, 1], "b-", label="Path")
+    ax.plot(pos_data_pixel[-1, 0], pos_data_pixel[-1, 1], "ro", label="End")
 
     # Add labels and title
-    plt.xlabel("X Position")
-    plt.ylabel("Y Position")
+    ax.set_xlabel("X Position")
+    ax.set_ylabel("Y Position")
+    ax.legend()
+
+    # Title
     plt.title("Robot Path in XY Plane")
-    plt.legend()
-    plt.grid(visible=True)
-
-    # Set equal aspect ratio and center at (0,0)
-    plt.axis("equal")
-
+    print("show plot")
     # Show results
     plt.show()
 
@@ -139,8 +179,8 @@ def evaluate(weights,robot_graph):
     world = OlympicArena()
     mj.set_mjcb_control(None)
     robot = construct_mjspec_from_graph(robot_graph)
-    #robot= gecko()
-    world.spawn(robot.spec, spawn_position=[0, 0, 0.1])
+    robot= gecko()
+    world.spawn(robot.spec, spawn_position=SPAWN_POS)
 
     model = world.spec.compile()
     data = mj.MjData(model)
@@ -184,7 +224,7 @@ def experiment(robot_graph: Any, mode: ViewerTypes = "viewer") -> np.ndarray:
     mj.set_mjcb_control(None)  # DO NOT REMOVE
     robot = construct_mjspec_from_graph(robot_graph)
     # Create world and spawn robot
-    # robot=gecko()
+    robot=gecko()
     world = OlympicArena()
     world.spawn(robot.spec, spawn_position=[0, 0, 0.1])
 
@@ -235,7 +275,7 @@ def main() -> None:
     )
     save_graph_as_json(robot_graph, DATA / "robot_graph.json")
     core = construct_mjspec_from_graph(robot_graph)
-    # core = gecko()
+    core = gecko()
     # Clear old history
     HISTORY.clear()
 
@@ -244,7 +284,7 @@ def main() -> None:
 
     # Create world and spawn robot for simulation
     world = OlympicArena()
-    world.spawn(core.spec, spawn_position=[0, 0, 0.1])
+    world.spawn(core.spec, spawn_position=SPAWN_POS)
     model = world.spec.compile()
     data = mj.MjData(model)
     #core = construct_mjspec_from_graph(robot_graph)  # rebuild before reuse
@@ -252,8 +292,6 @@ def main() -> None:
     geoms = world.spec.worldbody.find_all(mj.mjtObj.mjOBJ_GEOM)
     to_track = [data.bind(geom) for geom in geoms if "core" in geom.name]
 
-    # Tracker
-    # tracker = Tracker(mujoco_obj_to_find=mj.mjtObj.mjOBJ_GEOM, name_to_bind="core")
 
     # Neural controller
     input_size = len(data.qpos) + len(data.qvel) + 2
