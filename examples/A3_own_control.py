@@ -53,12 +53,19 @@ HISTORY = []
 
 ## my code below
 # --- Non-learner prescreen settings --- #
-NONLEARNER_SECONDS = 4.0     # short, cheap sim
-MIN_DX = 0.03                # minimal planar displacement (m)
-MIN_V_RMS = 0.01             # minimal RMS planar speed (m/s) over last ~1s
-MAX_BODY_RETRIES = 12        # don't get stuck resampling forever
-SETTLE_SECONDS = 0.75      # let it fall/settle; ignore this phase
+NONLEARNER_SECONDS = 2.0     # short, cheap sim
+MIN_DX = 0.10                # minimal planar displacement (m)
+MIN_V_RMS = 0.04             # minimal RMS planar speed (m/s) over last ~1s
+MAX_BODY_RETRIES = 10        # don't get stuck resampling forever
+SETTLE_SECONDS = 0.5      # let it fall/settle; ignore this phase
 KICK_SCALE = 1.0           # 1.0 = full-range random torques during active phase
+
+# put near the top with the other constants
+SMOOTHING    = 0.9   # raise from 0.1 so actions actually change
+KICK_SECONDS = 1.0   # brief boost to break static friction
+KICK_GAIN    = 1.8  # 25% stronger control for the first 0.4s
+EXPL_NOISE   = 0.02  # small exploration noise on controls (optional)
+
 
 
 
@@ -134,6 +141,123 @@ def sample_learner_robot_graph(num_modules: int, genotype_size: int) -> "DiGraph
     raise RuntimeError(f"Failed to sample a learner body in {MAX_BODY_RETRIES} attempts")
 
 ## my code above
+
+# === BODY EVOLUTION (NEW) =====================================================
+# We evolve the NDE *input vectors* [type_p, conn_p, rot_p] with an outer optimizer.
+# For each candidate body, we (cheaply) optimize controller weights inside (inner loop),
+# evaluate with your 'fitness', and send that score back to the outer optimizer.
+
+def decode_graph_from_body_vec(vec: np.ndarray, num_modules: int, genotype_size: int) -> "DiGraph":
+    """vec is length 3*genotype_size: [type | conn | rot] in [0,1]."""
+    nde = NeuralDevelopmentalEncoding(number_of_modules=num_modules)
+    hpd = HighProbabilityDecoder(num_modules)
+    type_p = vec[0:genotype_size].astype(np.float32)
+    conn_p = vec[genotype_size:2*genotype_size].astype(np.float32)
+    rot_p  = vec[2*genotype_size:3*genotype_size].astype(np.float32)
+    p_mats = nde.forward([type_p, conn_p, rot_p])
+    return hpd.probability_matrices_to_graph(*p_mats)
+
+def optimize_last_layer_for_body(robot_graph: "DiGraph",
+                                 base_weights: np.ndarray | None = None,
+                                 seed: int = 42,
+                                 budget: int = 120) -> tuple[np.ndarray, float]:
+    """
+    Inner loop: given a body, find good controller weights using Nevergrad CMA (or DE).
+    Returns (best_weights, best_fitness).
+    """
+    rng = np.random.default_rng(seed)
+    # Build a dummy model to get num_params from NeuralController
+    world = OlympicArena()
+    mj.set_mjcb_control(None)
+    robot = construct_mjspec_from_graph(robot_graph)
+    world.spawn(robot.spec, spawn_position=[0, 0, 0.1])
+    model = world.spec.compile()
+    data = mj.MjData(model)
+    input_size = len(data.qpos) + len(data.qvel) + 2
+    hidden_size = 8
+    output_size = model.nu
+    dummy = NeuralController(input_size, hidden_size, output_size, weights=None)
+    num_params = dummy.num_params
+
+    # Parameterization
+    parametrization = ng.p.Array(shape=(num_params,))
+    parametrization.random_state.seed(seed)
+    if base_weights is not None and base_weights.shape[0] == num_params:
+        parametrization.set_bounds(-3.0, 3.0)  # gentle box; optional
+        parametrization.value = base_weights.copy()
+
+    # Choose the controller optimizer (CMA or DE). CMA is strong; DE is simpler.
+    # opt = ng.optimizers.CMA(parametrization=parametrization, budget=budget)
+    opt = ng.optimizers.CMA(parametrization=parametrization, budget=budget)
+
+    def objective(w):
+        return -evaluate(w, robot_graph)
+
+    rec = opt.minimize(objective)
+    best_fit = -objective(rec.value)
+    return rec.value, best_fit
+
+def evolve_body(num_modules: int,
+                genotype_size: int,
+                outer_budget: int = 60,
+                inner_budget: int = 120,
+                seed: int = SEED) -> tuple["DiGraph", np.ndarray, float]:
+    """
+    Outer loop over the NDE vectors (3 * genotype_size).
+    For each candidate:
+      - decode to a graph
+      - quick prescreen (kill non-movers)
+      - inner optimize controller
+    We *minimize* the negative fitness.
+    """
+    total_dim = 3 * genotype_size
+    parametrization = ng.p.Array(shape=(total_dim,))
+    parametrization.random_state.seed(seed)
+
+    # Initialize in [0,1] as NDE inputs are probabilities
+    init = RNG.random(total_dim).astype(np.float32)
+    parametrization.value = init
+
+    # Outer optimizer: use DE for simplicity (you can swap to CMA easily)
+    # outer = ng.optimizers.CMA(parametrization=parametrization, budget=outer_budget)
+    outer = ng.optimizers.DE(parametrization=parametrization, budget=outer_budget)
+
+    A2_BASE_WEIGHTS = None  # or a warm start np.ndarray if you have one from A2
+
+    def outer_objective(vec):
+        # Keep values in [0,1] for NDE probabilities
+        v = np.clip(np.asarray(vec, dtype=np.float32), 0.0, 1.0)
+        try:
+            graph = decode_graph_from_body_vec(v, num_modules, genotype_size)
+        except Exception:
+            # Bad decode → heavy penalty
+            return 1e6
+
+        # Non-learner prescreen: cheap sim with settle+random kicks
+        passed, dx, v_rms = is_learner(graph)
+        if not passed:
+            # Penalize but keep some grad-less signal (smaller dx/v helps a bit)
+            return 1e3 - 10.0 * (dx + v_rms)
+
+        # Inner optimization over controller for this body
+        best_w, best_fit = optimize_last_layer_for_body(
+            graph,
+            base_weights=A2_BASE_WEIGHTS,
+            seed=seed,
+            budget=inner_budget,
+        )
+        # We minimize, so return negative fitness
+        return -best_fit
+
+    rec = outer.minimize(outer_objective)
+    best_vec = np.clip(rec.value, 0.0, 1.0).astype(np.float32)
+    best_graph = decode_graph_from_body_vec(best_vec, num_modules, genotype_size)
+    best_weights, best_fit = optimize_last_layer_for_body(
+        best_graph, base_weights=None, seed=seed, budget=inner_budget
+    )
+
+    return best_graph, best_weights, best_fit
+# === END BODY EVOLUTION (NEW) ================================================
 
 def show_xpos_history(history: list[float]) -> None:
     # Create a tracking camera
@@ -218,89 +342,230 @@ def random_move(
     ).astype(np.float64)
 
 
+# class NeuralController:
+#     def __init__(self, input_size, hidden_size, output_size, weights=None):
+#         self.input_size = input_size
+#         self.hidden_size = hidden_size
+#         self.output_size = output_size
+
+#         self.num_params = (input_size * hidden_size) + (hidden_size * hidden_size) + (hidden_size * output_size)
+
+#         if weights is None:
+#             self.weights = np.random.randn(self.num_params) * 0.1
+#         else:
+#             self.weights = np.array(weights)
+
+#     def forward(self, inputs):
+#         def tanh(x):
+#             return np.tanh(x)
+
+#         idx = 0
+#         W1 = self.weights[idx: idx + self.input_size * self.hidden_size].reshape(self.input_size, self.hidden_size)
+#         idx += self.input_size * self.hidden_size
+#         W2 = self.weights[idx: idx + self.hidden_size * self.hidden_size].reshape(self.hidden_size, self.hidden_size)
+#         idx += self.hidden_size * self.hidden_size
+#         W3 = self.weights[idx: idx + self.hidden_size * self.output_size].reshape(self.hidden_size, self.output_size)
+        
+#         layer1 = tanh(np.dot(inputs, W1))
+#         layer2 = tanh(np.dot(layer1, W2))
+#         outputs = tanh(np.dot(layer2, W3))  
+
+#         return outputs.reshape(self.output_size)
+
 class NeuralController:
     def __init__(self, input_size, hidden_size, output_size, weights=None):
-        self.input_size = input_size
+        self.input_size  = input_size
         self.hidden_size = hidden_size
         self.output_size = output_size
 
-        self.num_params = (input_size * hidden_size) + (hidden_size * hidden_size) + (hidden_size * output_size)
+        # params: W1 + b1 + W2 + b2 + W3 + b3
+        self.nW1 = input_size * hidden_size
+        self.nb1 = hidden_size
+        self.nW2 = hidden_size * hidden_size
+        self.nb2 = hidden_size
+        self.nW3 = hidden_size * output_size
+        self.nb3 = output_size
+        self.num_params = self.nW1 + self.nb1 + self.nW2 + self.nb2 + self.nW3 + self.nb3
 
         if weights is None:
             self.weights = np.random.randn(self.num_params) * 0.1
         else:
-            self.weights = np.array(weights)
+            self.weights = np.array(weights, dtype=float)
 
     def forward(self, inputs):
-        def tanh(x):
-            return np.tanh(x)
-
         idx = 0
-        W1 = self.weights[idx: idx + self.input_size * self.hidden_size].reshape(self.input_size, self.hidden_size)
-        idx += self.input_size * self.hidden_size
-        W2 = self.weights[idx: idx + self.hidden_size * self.hidden_size].reshape(self.hidden_size, self.hidden_size)
-        idx += self.hidden_size * self.hidden_size
-        W3 = self.weights[idx: idx + self.hidden_size * self.output_size].reshape(self.hidden_size, self.output_size)
-        
-        layer1 = tanh(np.dot(inputs, W1))
-        layer2 = tanh(np.dot(layer1, W2))
-        outputs = tanh(np.dot(layer2, W3))  
+        W1 = self.weights[idx: idx + self.nW1].reshape(self.input_size, self.hidden_size); idx += self.nW1
+        b1 = self.weights[idx: idx + self.nb1];                                               idx += self.nb1
+        W2 = self.weights[idx: idx + self.nW2].reshape(self.hidden_size, self.hidden_size);   idx += self.nW2
+        b2 = self.weights[idx: idx + self.nb2];                                               idx += self.nb2
+        W3 = self.weights[idx: idx + self.nW3].reshape(self.hidden_size, self.output_size);   idx += self.nW3
+        b3 = self.weights[idx: idx + self.nb3];                                               idx += self.nb3
 
-        return outputs.reshape(self.output_size)
+        h1 = np.tanh(inputs @ W1 + b1)
+        h2 = np.tanh(h1 @ W2 + b2)
+        out = np.tanh(h2 @ W3 + b3)   # [-1,1]
+        return out.reshape(self.output_size)
 
-def controller(model, data, to_track, neural_net: NeuralController):
-    inputs = np.concatenate([data.qpos.copy(),data.qvel.copy(),[np.sin(data.time * 2 * np.pi)],[np.cos(data.time * 2 * np.pi)]])
 
-    raw_output = neural_net.forward(inputs)
-    target_angles = raw_output * (np.pi / 2) # map the output to possible joint angles
 
-    smoothing = 0.1  # 0: no smooting, 1: only target angles 
-    data.ctrl[:] = (1 - smoothing) * data.ctrl[:] + smoothing * target_angles
 
-    HISTORY.append(to_track[0].xpos.copy())
+# precompute once per model
+def joint_phases(model):
+    # evenly spaced phases per actuator
+    return np.linspace(0.0, 2*np.pi, num=model.nu, endpoint=False)
 
-def evaluate(weights,robot_graph):
-    world = OlympicArena()
+PHASES = None  # global/cache
+
+
+def controller(model, data, to_track, neural_net: NeuralController, record=True):
+    # inputs
+    inputs = np.concatenate([
+        data.qpos.copy(), data.qvel.copy(),
+        [np.sin(data.time * 2 * np.pi)], [np.cos(data.time * 2 * np.pi)]
+    ])
+
+    # ---- CPG gating & bias ----
+    BASE_FREQ = 2.5     # was 2.0 -> a bit quicker step cycle
+    BIAS_AMP  = 0.35    # was 0.25 -> stronger oscillation
+    DUTY      = 0.60    # was 0.70 -> less suppression in the "weak" half-cycle
+    CTRL_GAIN = 1.6     # NEW: global amplitude gain on the NN/CPG command
+
+    omega  = 2 * np.pi * BASE_FREQ
+    # simple anti-phase pattern (often better than evenly spaced if limbs are paired)
+    phases = (np.arange(model.nu) % 2) * np.pi
+    cpg    = np.sin(omega * data.time + phases)
+
+    # small oscillatory bias to encourage alternating legs
+    bias = BIAS_AMP * cpg
+
+    # NN output in [-1,1], include bias once
+    raw = np.tanh(neural_net.forward(inputs) + bias)
+    assert raw.shape[0] == model.nu, f"NN outputs {raw.shape[0]} but model.nu={model.nu}"
+
+    # duty-cycle gating: 1.0 on "push" half, 1-DUTY on the other half
+    gate = (cpg > 0).astype(np.float64) * DUTY + (1.0 - DUTY)   # in [1-DUTY, 1]
+    raw *= gate
+
+    # ======= actuation & smoothing =======
+    ctrlrange = model.actuator_ctrlrange[:model.nu]
+    lo, hi = ctrlrange[:, 0], ctrlrange[:, 1]
+
+    # base command from NN/CPG (+ small exploration noise)
+    u_base = CTRL_GAIN * raw + EXPL_NOISE * RNG.standard_normal(model.nu)
+
+    # stronger/longer kick to break static friction
+    kick = KICK_GAIN if data.time < KICK_SECONDS else 1.0
+    u = np.clip(u_base * kick, lo, hi)
+
+    # smoother but still responsive
+    data.ctrl[:] = (1.0 - SMOOTHING) * data.ctrl[:] + SMOOTHING * u
+
+
+    if record:
+        HISTORY.append(to_track[0].xpos.copy())
+
+
+
+def evaluate(weights,
+             robot_graph,
+             steps: int = 600,
+             record: bool = False,
+             action_stride: int = 1,
+             early_stop: bool = True) -> float:
+    """
+    One evaluation of a controller on a given body.
+    - Builds world+model, runs a short rollout, and returns a progress-oriented fitness.
+    - 'record=False' avoids HISTORY spam during optimization.
+    - 'action_stride>1' applies the controller every k steps (cheap speedup).
+    - Early-stops if the robot is stagnant for ~0.8s after the first 0.5s.
+    """
+    # --- world & model ---
     mj.set_mjcb_control(None)
+    world = OlympicArena()
     robot = construct_mjspec_from_graph(robot_graph)
-    #robot= gecko()
-    world.spawn(robot.spec, spawn_position=[0, 0, 0.1])
-
+    world.spawn(robot.spec, spawn_position=SPAWN_POS)
     model = world.spec.compile()
     data = mj.MjData(model)
 
-    data.qpos[:] = 0.0 # reset position
-    data.qvel[:] = 0.0 # reset velocity
-
+    # --- track the 'core' geom(s) ---
     geoms = world.spec.worldbody.find_all(mj.mjtObj.mjOBJ_GEOM)
-    to_track = [data.bind(geom) for geom in geoms if "core" in geom.name]
+    to_track = [data.bind(g) for g in geoms if "core" in g.name]
+    if not to_track:
+        return -1e6  # no core found → bad body
 
-    input_size = len(data.qpos) + len(data.qvel) + 2 
-    neural_net = NeuralController(input_size=input_size,hidden_size=8,output_size=model.nu,weights=weights)
+    # --- controller net ---
+    input_size  = len(data.qpos) + len(data.qvel) + 2
+    hidden_size = 8
+    output_size = model.nu
+    net = NeuralController(input_size=input_size,
+                           hidden_size=hidden_size,
+                           output_size=output_size,
+                           weights=weights)
 
-    steps = 2500
+    # --- rollout ---
     joint_history = []
+    x_hist = []
+    dt = float(model.opt.timestep)
 
-    for _ in range(steps):
-        controller(model, data, to_track, neural_net)
+    prev_xy = np.array(to_track[0].xpos[:2], dtype=float)
+    stagnant = 0
+    # ~0.8s of no movement allowed (after 0.5s)
+    stagnation_limit = max(1, int(0.8 / max(dt, 1e-6)))
+    min_move = 0.002  # meters between checks
+
+    for t in range(steps):
+        if (t % action_stride) == 0:
+            # your controller MUST accept record=...; if not, remove the arg
+            controller(model, data, to_track, net, record=record)
         mj.mj_step(model, data)
+
+        # logs for fitness
         joint_history.append(data.ctrl.copy())
+        x_hist.append(float(to_track[0].xpos[0]))
 
-    joint_history = np.array(joint_history)
-    return fitness(to_track, joint_history)
+        # early-stagnation check
+        if early_stop and data.time > 0.5:
+            cur_xy = np.array(to_track[0].xpos[:2], dtype=float)
+            if np.linalg.norm(cur_xy - prev_xy) < min_move:
+                stagnant += 1
+            else:
+                stagnant = 0
+            if stagnant > stagnation_limit:
+                break
+            prev_xy = cur_xy
 
-def fitness(to_track, joint_history):
-    final_pos = to_track[0].xpos.copy()
-    displacement_y = abs(final_pos[1])  
-    displacement_x = final_pos[0] 
+    joint_history = np.asarray(joint_history) if joint_history else np.zeros((1, model.nu))
+    x_hist = np.asarray(x_hist) if x_hist else np.zeros(1)
 
-    oscillation_reward = np.mean(np.std(joint_history, axis=0)) # variation of the joint angles
+    return fitness_adv(to_track, joint_history, x_hist)
 
-    saturation_penalty = np.mean(np.abs(np.abs(joint_history) - (np.pi / 2))) # to avoid getting stuck on max or min joint angles
 
-    fitness = displacement_x + 0.08 * oscillation_reward - 0.08 * saturation_penalty - 0.3*displacement_y
+def fitness_adv(to_track, joint_history: np.ndarray, x_hist: np.ndarray) -> float:
+    """
+    Progress-oriented fitness:
+      + sum of positive forward deltas (progress)
+      + final forward x
+      - sideways drift
+      +/- light regularization on joint activity
+    """
+    final_x = float(to_track[0].xpos[0])
+    drift_y = abs(float(to_track[0].xpos[1]))
 
-    return fitness
+    # accumulated forward progress (only positive steps)
+    progress = float(np.maximum(0.0, np.diff(x_hist)).sum()) if x_hist.size > 1 else 0.0
+
+    # activity regularizers (kept small)
+    osc = float(np.mean(np.std(joint_history, axis=0))) if joint_history.size else 0.0
+    # encourage using range but not slamming extremes (simple L1 on ctrl changes)
+    if joint_history.shape[0] > 1:
+        du = np.diff(joint_history, axis=0)
+        smooth_pen = float(np.mean(np.abs(du)))
+    else:
+        smooth_pen = 0.0
+
+    # weights are mild; main driver is progress + final_x
+    return 0.7 * progress + 0.5 * final_x + 0.05 * osc - 0.03 * smooth_pen - 0.30 * drift_y
+
 
 
 def experiment(robot_graph: Any, mode: ViewerTypes = "viewer") -> np.ndarray:
@@ -327,7 +592,7 @@ def experiment(robot_graph: Any, mode: ViewerTypes = "viewer") -> np.ndarray:
     # Nevergrad optimizer
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
-    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=200)
+    optimizer = ng.optimizers.CMA(parametrization=parametrization, budget=3000)
 
     # Objective function
     def objective(x):
@@ -339,61 +604,76 @@ def experiment(robot_graph: Any, mode: ViewerTypes = "viewer") -> np.ndarray:
     return recommendation.value
 
 
+
+def smoke_test_once(num_modules=8, genotype_size=16):
+    """Quick pipeline check: decode random body -> prescreen -> 200-step eval with random weights."""
+    print("\n[SMOKE] starting quick pipeline check")
+    nde = NeuralDevelopmentalEncoding(number_of_modules=num_modules)
+    hpd = HighProbabilityDecoder(num_modules)
+    # small genotype for speed
+    type_p = RNG.random(genotype_size).astype(np.float32)
+    conn_p = RNG.random(genotype_size).astype(np.float32)
+    rot_p  = RNG.random(genotype_size).astype(np.float32)
+    p_mats = nde.forward([type_p, conn_p, rot_p])
+    graph  = hpd.probability_matrices_to_graph(*p_mats)
+
+    passed, dx, v_rms = is_learner(graph)
+    print(f"[SMOKE] prescreen pass={passed} | dx={dx:.3f} v_rms={v_rms:.3f}")
+
+    # Tiny eval: compile once, run 200 steps with random controller weights
+    world = OlympicArena()
+    mj.set_mjcb_control(None)
+    robot = construct_mjspec_from_graph(graph)
+    world.spawn(robot.spec, spawn_position=SPAWN_POS)
+    model = world.spec.compile()
+    data = mj.MjData(model)
+    geoms = world.spec.worldbody.find_all(mj.mjtObj.mjOBJ_GEOM)
+    to_track = [data.bind(g) for g in geoms if "core" in g.name]
+
+    input_size = len(data.qpos) + len(data.qvel) + 2
+    net = NeuralController(input_size, 8, model.nu)  # random weights
+    steps = 200
+    joint_hist = []
+    for _ in range(steps):
+        controller(model, data, to_track, net)
+        mj.mj_step(model, data)
+        joint_hist.append(data.ctrl.copy())
+    fit = fitness_adv(to_track, np.array(joint_hist), np.array([d[0] for d in to_track]))
+    print(f"[SMOKE] 200-step fitness={fit:.4f}, end_x={to_track[0].xpos[0]:.3f}")
+
+
 def main() -> None:
-    """Entry point."""
-    num_modules = 20
+    num_modules   = 20
     genotype_size = 64
 
-    # # Random genotype
-    # type_p_genes = RNG.random(genotype_size).astype(np.float32)
-    # conn_p_genes = RNG.random(genotype_size).astype(np.float32)
-    # rot_p_genes = RNG.random(genotype_size).astype(np.float32)
-    # genotype = [type_p_genes, conn_p_genes, rot_p_genes]
+    # Evolve body + controller jointly (outer = body, inner = controller)
+    best_graph, best_weights, best_fit = evolve_body(
+        num_modules=num_modules,
+        genotype_size=genotype_size,
+        outer_budget=120,   # try 100–200 if you have time
+        inner_budget=300,  # per-body controller budget (keep modest)
+        seed=SEED,
+    )
+    print(f"[RESULT] best fitness = {best_fit:.4f}")
 
-    # # Decode robot
-    # nde = NeuralDevelopmentalEncoding(number_of_modules=num_modules)
-    # p_matrices = nde.forward(genotype)
-    # hpd = HighProbabilityDecoder(num_modules)
-    # robot_graph = hpd.probability_matrices_to_graph(
-    #     p_matrices[0], p_matrices[1], p_matrices[2]
-    # )
+    # Save body JSON (needed for Robot Olympics submission)
+    save_graph_as_json(best_graph, DATA / "robot_graph.json")
 
-    # Sample a body that passes the non-learner prescreen
-    robot_graph = sample_learner_robot_graph(num_modules=num_modules, genotype_size=genotype_size)
-
-    save_graph_as_json(robot_graph, DATA / "robot_graph.json")
-    core = construct_mjspec_from_graph(robot_graph)
-    # core = gecko()
-    # Clear old history
-    HISTORY.clear()
-
-    # Optimize weights
-    best_weights = experiment(robot_graph=robot_graph)
-
-    # Create world and spawn robot for simulation
+    # === Launch the final run (unchanged) ===
+    core = construct_mjspec_from_graph(best_graph)
     world = OlympicArena()
     world.spawn(core.spec, spawn_position=[0, 0, 0.1])
     model = world.spec.compile()
     data = mj.MjData(model)
-    #core = construct_mjspec_from_graph(robot_graph)  # rebuild before reuse
-    # Bind robot geoms to track
     geoms = world.spec.worldbody.find_all(mj.mjtObj.mjOBJ_GEOM)
     to_track = [data.bind(geom) for geom in geoms if "core" in geom.name]
-
-    # Tracker
-    # tracker = Tracker(mujoco_obj_to_find=mj.mjtObj.mjOBJ_GEOM, name_to_bind="core")
-
-    # Neural controller
     input_size = len(data.qpos) + len(data.qvel) + 2
     neural_net = NeuralController(input_size, 8, model.nu, best_weights)
     HISTORY.clear()
     mj.set_mjcb_control(lambda m, d: controller(m, d, to_track, neural_net))
-
-    # Launch viewer
     viewer.launch(model=model, data=data)
-
-    # Show path
     show_xpos_history(HISTORY)
+
 
 
 if __name__ == "__main__":
