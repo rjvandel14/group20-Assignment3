@@ -51,7 +51,7 @@ DATA.mkdir(exist_ok=True)
 SPAWN_POS = [0.0, 0.0, 0.1]
 HISTORY = []
 
-## my code below
+
 # --- Non-learner prescreen settings --- #
 NONLEARNER_SECONDS = 2.0     # short, cheap sim
 MIN_DX = 0.10                # minimal planar displacement (m)
@@ -61,10 +61,10 @@ SETTLE_SECONDS = 0.5      # let it fall/settle; ignore this phase
 KICK_SCALE = 1.0           # 1.0 = full-range random torques during active phase
 
 # put near the top with the other constants
-SMOOTHING    = 0.9   # raise from 0.1 so actions actually change
-KICK_SECONDS = 1.0   # brief boost to break static friction
-KICK_GAIN    = 1.8  # 25% stronger control for the first 0.4s
-EXPL_NOISE   = 0.02  # small exploration noise on controls (optional)
+SMOOTHING    = 0.85   # raise from 0.1 so actions actually change
+KICK_SECONDS = 1.2   # brief boost to break static friction
+KICK_GAIN    = 2.0  # 25% stronger control for the first 0.4s
+EXPL_NOISE   = 0.015  # small exploration noise on controls (optional)
 
 
 
@@ -173,7 +173,7 @@ def optimize_last_layer_for_body(robot_graph: "DiGraph",
     world.spawn(robot.spec, spawn_position=[0, 0, 0.1])
     model = world.spec.compile()
     data = mj.MjData(model)
-    input_size = len(data.qpos) + len(data.qvel) + 2
+    input_size = len(data.qpos) + len(data.qvel) + 2 + 3
     hidden_size = 8
     output_size = model.nu
     dummy = NeuralController(input_size, hidden_size, output_size, weights=None)
@@ -416,61 +416,80 @@ def joint_phases(model):
 
 PHASES = None  # global/cache
 
+def rmat_to_rpy(R: np.ndarray) -> tuple[float, float, float]:
+    """MuJoCo xmat -> roll,pitch,yaw (radians). R is 3x3."""
+    # R is world-from-body; this is a standard Tait-Bryan (XYZ) extraction.
+    roll  = np.arctan2(R[2,1], R[2,2])
+    pitch = -np.arcsin(np.clip(R[2,0], -1.0, 1.0))
+    yaw   = np.arctan2(R[1,0], R[0,0])
+    return float(roll), float(pitch), float(yaw)
 
 def controller(model, data, to_track, neural_net: NeuralController, record=True):
-    # inputs
+    # --- terrain features from the 'core' geom ---
+    # (to_track[0] is bound to a core geom)
+    R = np.array(to_track[0].xmat, dtype=float).reshape(3, 3)
+    roll, pitch, _ = rmat_to_rpy(R)             # radians
+    core_z = float(to_track[0].xpos[2])         # height above ground
+
+    # --- inputs: add terrain cues (roll, pitch, height) ---
     inputs = np.concatenate([
         data.qpos.copy(), data.qvel.copy(),
-        [np.sin(data.time * 2 * np.pi)], [np.cos(data.time * 2 * np.pi)]
+        [np.sin(data.time * 2 * np.pi), np.cos(data.time * 2 * np.pi)],
+        [roll, pitch, core_z],                    # <-- NEW (3 features)
     ])
 
-    # ---- CPG gating & bias ----
-    BASE_FREQ = 2.5     # was 2.0 -> a bit quicker step cycle
-    BIAS_AMP  = 0.35    # was 0.25 -> stronger oscillation
-    DUTY      = 0.60    # was 0.70 -> less suppression in the "weak" half-cycle
-    CTRL_GAIN = 1.6     # NEW: global amplitude gain on the NN/CPG command
+    # ---- base CPG params (good defaults for bumpy ground) ----
+    BASE_FREQ_FLAT = 1.6      # slower than on flat for better footing
+    BIAS_AMP       = 0.40     # higher step clearance
+    DUTY           = 0.65     # longer push phase
+    CTRL_GAIN_BASE = 1.9      # stronger commands on bumps
 
-    omega  = 2 * np.pi * BASE_FREQ
-    # simple anti-phase pattern (often better than evenly spaced if limbs are paired)
+    # --- adapt to tilt: slower but stronger when tilted ---
+    tilt = min(1.0, 0.7*abs(roll) + 0.7*abs(pitch))     # ~[0,1+] from tilt magnitude
+    base_freq = BASE_FREQ_FLAT * (1.0 - 0.5*tilt)       # reduce freq up to 50% when tilted
+    ctrl_gain = CTRL_GAIN_BASE * (1.0 + 0.6*tilt)       # increase amplitude up to +60%
+
+    omega  = 2 * np.pi * base_freq
+    # anti-phase pattern helps over irregularities when limbs come in pairs
     phases = (np.arange(model.nu) % 2) * np.pi
     cpg    = np.sin(omega * data.time + phases)
 
-    # small oscillatory bias to encourage alternating legs
+    # oscillatory bias for clearance
     bias = BIAS_AMP * cpg
 
     # NN output in [-1,1], include bias once
     raw = np.tanh(neural_net.forward(inputs) + bias)
     assert raw.shape[0] == model.nu, f"NN outputs {raw.shape[0]} but model.nu={model.nu}"
 
-    # duty-cycle gating: 1.0 on "push" half, 1-DUTY on the other half
-    gate = (cpg > 0).astype(np.float64) * DUTY + (1.0 - DUTY)   # in [1-DUTY, 1]
+    # duty gating: keep some thrust in the "weak" half
+    gate = (cpg > 0).astype(np.float64) * DUTY + (1.0 - DUTY)
     raw *= gate
 
     # ======= actuation & smoothing =======
     ctrlrange = model.actuator_ctrlrange[:model.nu]
     lo, hi = ctrlrange[:, 0], ctrlrange[:, 1]
 
-    # base command from NN/CPG (+ small exploration noise)
-    u_base = CTRL_GAIN * raw + EXPL_NOISE * RNG.standard_normal(model.nu)
+    # add small exploration noise (helps free when wedged)
+    u_base = ctrl_gain * raw + EXPL_NOISE * RNG.standard_normal(model.nu)
 
-    # stronger/longer kick to break static friction
+    # stronger/longer kick gets you onto/over obstacles
     kick = KICK_GAIN if data.time < KICK_SECONDS else 1.0
     u = np.clip(u_base * kick, lo, hi)
 
-    # smoother but still responsive
+    # slightly less smoothing on bumps (more reactive than glass-smooth)
     data.ctrl[:] = (1.0 - SMOOTHING) * data.ctrl[:] + SMOOTHING * u
-
 
     if record:
         HISTORY.append(to_track[0].xpos.copy())
 
 
 
+
 def evaluate(weights,
              robot_graph,
-             steps: int = 600,
+             steps: int = 1500,
              record: bool = False,
-             action_stride: int = 1,
+             action_stride: int = 2,
              early_stop: bool = True) -> float:
     """
     One evaluation of a controller on a given body.
@@ -494,7 +513,7 @@ def evaluate(weights,
         return -1e6  # no core found → bad body
 
     # --- controller net ---
-    input_size  = len(data.qpos) + len(data.qvel) + 2
+    input_size  = len(data.qpos) + len(data.qvel) + 2 + 3
     hidden_size = 8
     output_size = model.nu
     net = NeuralController(input_size=input_size,
@@ -510,8 +529,8 @@ def evaluate(weights,
     prev_xy = np.array(to_track[0].xpos[:2], dtype=float)
     stagnant = 0
     # ~0.8s of no movement allowed (after 0.5s)
-    stagnation_limit = max(1, int(0.8 / max(dt, 1e-6)))
-    min_move = 0.002  # meters between checks
+    stagnation_limit = max(1, int(1.5 / max(dt, 1e-6)))
+    min_move = 0.0015  # meters between checks
 
     for t in range(steps):
         if (t % action_stride) == 0:
@@ -651,7 +670,7 @@ def main() -> None:
         num_modules=num_modules,
         genotype_size=genotype_size,
         outer_budget=120,   # try 100–200 if you have time
-        inner_budget=300,  # per-body controller budget (keep modest)
+        inner_budget=600,  # per-body controller budget (keep modest)
         seed=SEED,
     )
     print(f"[RESULT] best fitness = {best_fit:.4f}")
@@ -667,7 +686,7 @@ def main() -> None:
     data = mj.MjData(model)
     geoms = world.spec.worldbody.find_all(mj.mjtObj.mjOBJ_GEOM)
     to_track = [data.bind(geom) for geom in geoms if "core" in geom.name]
-    input_size = len(data.qpos) + len(data.qvel) + 2
+    input_size = len(data.qpos) + len(data.qvel) + 2 + 3
     neural_net = NeuralController(input_size, 8, model.nu, best_weights)
     HISTORY.clear()
     mj.set_mjcb_control(lambda m, d: controller(m, d, to_track, neural_net))
