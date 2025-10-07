@@ -1,4 +1,4 @@
-"""Assignment 3 template code with Stepwise Controller."""
+"""Assignment 3 template code."""
 
 # Standard library
 from pathlib import Path
@@ -21,11 +21,14 @@ from ariel.body_phenotypes.robogen_lite.decoders.hi_prob_decoding import (
     HighProbabilityDecoder,
     save_graph_as_json,
 )
-from ariel.utils.renderers import single_frame_renderer, video_renderer
 from ariel.body_phenotypes.robogen_lite.prebuilt_robots.gecko import gecko
 from ariel.ec.genotypes.nde import NeuralDevelopmentalEncoding
+from ariel.simulation.controllers.controller import Controller
 from ariel.simulation.environments import OlympicArena
+from ariel.utils.renderers import single_frame_renderer, video_renderer
+from ariel.utils.runners import simple_runner
 from ariel.utils.tracker import Tracker
+from ariel.utils.video_recorder import VideoRecorder
 
 # Type Checking
 if TYPE_CHECKING:
@@ -218,6 +221,24 @@ def show_xpos_history(history: list[float]) -> None:
     # Show results
     plt.show()
 
+
+
+def random_move(
+    model: mj.MjModel,
+    data: mj.MjData,
+) -> npt.NDArray[np.float64]:
+    # Get the number of joints
+    num_joints = model.nu
+
+    # Hinges take values between -pi/2 and pi/2
+    hinge_range = np.pi / 2
+    return RNG.uniform(
+        low=-hinge_range,  # -pi/2
+        high=hinge_range,  # pi/2
+        size=num_joints,
+    ).astype(np.float64)
+
+
 class NeuralController:
     def __init__(self, input_size, hidden_size, output_size, weights=None):
         self.input_size = input_size
@@ -225,110 +246,123 @@ class NeuralController:
         self.output_size = output_size
 
         self.num_params = (input_size * hidden_size) + (hidden_size * hidden_size) + (hidden_size * output_size)
-        self.weights = np.array(weights) if weights is not None else np.random.randn(self.num_params) * 0.1
+
+        if weights is None:
+            self.weights = np.random.randn(self.num_params) * 0.1
+        else:
+            self.weights = np.array(weights)
 
     def forward(self, inputs):
+        def tanh(x):
+            return np.tanh(x)
+
         idx = 0
         W1 = self.weights[idx: idx + self.input_size * self.hidden_size].reshape(self.input_size, self.hidden_size)
         idx += self.input_size * self.hidden_size
         W2 = self.weights[idx: idx + self.hidden_size * self.hidden_size].reshape(self.hidden_size, self.hidden_size)
         idx += self.hidden_size * self.hidden_size
         W3 = self.weights[idx: idx + self.hidden_size * self.output_size].reshape(self.hidden_size, self.output_size)
-
-        layer1 = np.tanh(np.dot(inputs, W1))
-        layer2 = np.tanh(np.dot(layer1, W2))
-        outputs = np.tanh(np.dot(layer2, W3))
+        
+        layer1 = tanh(np.dot(inputs, W1))
+        layer2 = tanh(np.dot(layer1, W2))
+        outputs = tanh(np.dot(layer2, W3))  
 
         return outputs.reshape(self.output_size)
 
+def controller(model, data, to_track, neural_net: NeuralController):
+    inputs = np.concatenate([data.qpos.copy(),data.qvel.copy(),[np.sin(data.time * 2 * np.pi)],[np.cos(data.time * 2 * np.pi)]])
 
-# --- Stepwise Controller --- #
-class StepwiseController:
-    def __init__(self, neural_net, tracker, ctrl_every=50, save_every=100, alpha=0.1):
-        self.neural_net = neural_net
-        self.tracker = tracker
-        self.ctrl_every = ctrl_every
-        self.save_every = save_every
-        self.alpha = alpha
-        self.step_count = 0
+    raw_output = neural_net.forward(inputs)
+    target_angles = raw_output * (np.pi / 2) # map the output to possible joint angles
 
-    def step(self, model, data):
-        self.step_count += 1
+    smoothing = 0.1  # 0: no smooting, 1: only target angles 
+    data.ctrl[:] = (1 - smoothing) * data.ctrl[:] + smoothing * target_angles
 
-        if self.step_count % self.save_every == 0:
-            self.tracker.update(data)
+    HISTORY.append(to_track[0].xpos.copy())
 
-        if self.step_count % self.ctrl_every == 0:
-            inputs = np.concatenate([
-                data.qpos.copy(),
-                data.qvel.copy(),
-                [np.sin(data.time * 2 * np.pi)],
-                [np.cos(data.time * 2 * np.pi)]
-            ])
-            output = self.neural_net.forward(inputs)
-            target_angles = output * (np.pi / 2)
-            data.ctrl[:] = (1 - self.alpha) * data.ctrl[:] + self.alpha * target_angles
-
-
-def evaluate(weights, robot_graph):
+def evaluate(weights,robot_graph):
     world = OlympicArena()
     mj.set_mjcb_control(None)
     robot = construct_mjspec_from_graph(robot_graph)
-    #robot = gecko()
-    world.spawn(robot.spec, spawn_position=[-0.8, 0.0, 0.1])
+    #robot= gecko()
+    world.spawn(robot.spec, spawn_position=[0, 0, 0.1])
 
     model = world.spec.compile()
     data = mj.MjData(model)
-    data.qpos[:] = 0.0
-    data.qvel[:] = 0.0
 
-    tracker = Tracker(mujoco_obj_to_find=mj.mjtObj.mjOBJ_GEOM, name_to_bind="core")
-    tracker.setup(world.spec, data)
+    data.qpos[:] = 0.0 # reset position
+    data.qvel[:] = 0.0 # reset velocity
 
-    input_size = len(data.qpos) + len(data.qvel) + 2
-    neural_net = NeuralController(input_size, 8, model.nu, weights)
+    geoms = world.spec.worldbody.find_all(mj.mjtObj.mjOBJ_GEOM)
+    to_track = [data.bind(geom) for geom in geoms if "core" in geom.name]
 
-    controller = StepwiseController(neural_net, tracker, ctrl_every=5, save_every=100, alpha=0.8)
+    input_size = len(data.qpos) + len(data.qvel) + 2 
+    neural_net = NeuralController(input_size=input_size,hidden_size=8,output_size=model.nu,weights=weights)
 
     steps = 2500
     joint_history = []
 
     for _ in range(steps):
-        controller.step(model, data)
+        controller(model, data, to_track, neural_net)
         mj.mj_step(model, data)
         joint_history.append(data.ctrl.copy())
 
-    return fitness_function(tracker.history["xpos"][0])
+    joint_history = np.array(joint_history)
+    return fitness(to_track, joint_history)
+
+def fitness(to_track, joint_history):
+    final_pos = to_track[0].xpos.copy()
+    displacement_y = abs(final_pos[1])  
+    displacement_x = final_pos[0] 
+
+    oscillation_reward = np.mean(np.std(joint_history, axis=0)) # variation of the joint angles
+
+    saturation_penalty = np.mean(np.abs(np.abs(joint_history) - (np.pi / 2))) # to avoid getting stuck on max or min joint angles
+
+    fitness = displacement_x + 0.08 * oscillation_reward - 0.08 * saturation_penalty - 0.3*displacement_y
+
+    return fitness
 
 
-def experiment(robot_graph: Any) -> np.ndarray:
-    mj.set_mjcb_control(None)
+def experiment(robot_graph: Any, mode: ViewerTypes = "viewer") -> np.ndarray:
+    """Run the simulation with optimizer to find best weights."""
+    mj.set_mjcb_control(None)  # DO NOT REMOVE
     robot = construct_mjspec_from_graph(robot_graph)
-    #robot = gecko()
+    # Create world and spawn robot
+    # robot=gecko()
     world = OlympicArena()
-    world.spawn(robot.spec, spawn_position=[-0.8, 0.0, 0.1])
+    world.spawn(robot.spec, spawn_position=[0, 0, 0.1])
 
+    # Compile full world (includes robot)
     model = world.spec.compile()
     data = mj.MjData(model)
     mj.mj_resetData(model, data)
 
+    # Neural controller setup
     input_size = len(data.qpos) + len(data.qvel) + 2
-    dummy_net = NeuralController(input_size, 8, model.nu)
+    hidden_size = 8
+    output_size = model.nu
+    dummy_net = NeuralController(input_size, hidden_size, output_size)
     num_params = dummy_net.num_params
 
+    # Nevergrad optimizer
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
-    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=100)
+    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=200)
 
+    # Objective function
     def objective(x):
-        return -evaluate(x, robot_graph)
+        return -evaluate(x, robot_graph)  # evaluate uses world + compiled model
 
+    # Run optimization
     recommendation = optimizer.minimize(objective)
     print("Best fitness:", -objective(recommendation.value))
     return recommendation.value
 
 
 def main() -> None:
+    """Entry point."""
+    num_modules = 20
     genotype_size = 64
 
     # # Random genotype
@@ -350,30 +384,37 @@ def main() -> None:
 
     save_graph_as_json(robot_graph, DATA / "robot_graph.json")
     core = construct_mjspec_from_graph(robot_graph)
-    #core = gecko()
+    # core = gecko()
+    # Clear old history
+    HISTORY.clear()
 
-    mj.set_mjcb_control(None)
-    best_weights = experiment(robot_graph)
+    # Optimize weights
+    best_weights = experiment(robot_graph=robot_graph)
 
+    # Create world and spawn robot for simulation
     world = OlympicArena()
-    world.spawn(core.spec, spawn_position=[-0.8, 0.0, 0.1])
+    world.spawn(core.spec, spawn_position=[0, 0, 0.1])
     model = world.spec.compile()
     data = mj.MjData(model)
-    mj.mj_resetData(model, data)
+    #core = construct_mjspec_from_graph(robot_graph)  # rebuild before reuse
+    # Bind robot geoms to track
+    geoms = world.spec.worldbody.find_all(mj.mjtObj.mjOBJ_GEOM)
+    to_track = [data.bind(geom) for geom in geoms if "core" in geom.name]
 
-    tracker = Tracker(mujoco_obj_to_find=mj.mjtObj.mjOBJ_GEOM, name_to_bind="core")
-    tracker.setup(world.spec, data)
-    tracker.update(data)
+    # Tracker
+    # tracker = Tracker(mujoco_obj_to_find=mj.mjtObj.mjOBJ_GEOM, name_to_bind="core")
 
+    # Neural controller
     input_size = len(data.qpos) + len(data.qvel) + 2
     neural_net = NeuralController(input_size, 8, model.nu, best_weights)
-    stepwise_ctrl = StepwiseController(neural_net, tracker, ctrl_every=15, save_every=100, alpha=0.8)
-    mj.set_mjcb_control(lambda m, d: stepwise_ctrl.step(m, d))
+    HISTORY.clear()
+    mj.set_mjcb_control(lambda m, d: controller(m, d, to_track, neural_net))
 
+    # Launch viewer
     viewer.launch(model=model, data=data)
 
-    print(tracker.history["xpos"][0])
-    show_xpos_history(tracker.history["xpos"][0])
+    # Show path
+    show_xpos_history(HISTORY)
 
 
 if __name__ == "__main__":
