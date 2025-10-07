@@ -12,6 +12,7 @@ import numpy.typing as npt
 from mujoco import viewer
 import random
 import nevergrad as ng
+from networkx import Graph
 
 # Local libraries
 from ariel.body_phenotypes.robogen_lite.constructor import (
@@ -21,9 +22,14 @@ from ariel.body_phenotypes.robogen_lite.decoders.hi_prob_decoding import (
     HighProbabilityDecoder,
     save_graph_as_json,
 )
+from ariel.body_phenotypes.robogen_lite.config import (
+    ModuleType,
+)
+from ariel.body_phenotypes.robogen_lite.modules.hinge import HingeModule
 from ariel.utils.renderers import single_frame_renderer, video_renderer
 from ariel.body_phenotypes.robogen_lite.prebuilt_robots.gecko import gecko
 from ariel.ec.genotypes.nde import NeuralDevelopmentalEncoding
+from ariel.body_phenotypes.robogen_lite.modules.brick import BrickModule
 from ariel.simulation.environments import OlympicArena
 from ariel.utils.tracker import Tracker
 
@@ -49,8 +55,21 @@ SPAWN_POS = [-0.8, 0.0, 0.1]
 NUM_OF_MODULES = 30
 TARGET_POSITION = [5, 0, 0.5]
 
+def count_from_graph(graph: Graph, name) -> int:
+    count = 0
+    if name == "BRICK":
+        for node in graph.nodes:
+            module_type = graph.nodes[node]["type"]
+            if module_type in ModuleType.BRICK.name:
+                count += 1
+    elif name == "HINGE":
+        for node in graph.nodes:
+            module_type = graph.nodes[node]["type"]
+            if module_type in ModuleType.HINGE.name:
+                count += 1
+    return count
 
-def fitness_function(history: list[float]) -> float:
+def fitness_function(history: list[float], graph: Graph) -> float:
     xt, yt, zt = TARGET_POSITION
     xc, yc, zc = history[-1]
 
@@ -58,7 +77,15 @@ def fitness_function(history: list[float]) -> float:
         (xt - xc) ** 2 + (yt - yc) ** 2 + (zt - zc) ** 2,
     )
 
-    return -cartesian_distance
+    num_blocks = count_from_graph(graph, "BRICK")
+    num_hinges = count_from_graph(graph, "HINGE")
+
+    arch_penalty = 0
+    ratio = num_blocks/(num_hinges)
+    if ratio > 1:
+        arch_penalty = 0.3
+
+    return cartesian_distance+arch_penalty*ratio
 
 def fitness(history: list[float], joint_history):
     final_pos = history[-1]
@@ -219,7 +246,7 @@ def evaluate(weights, robot_graph):
         mj.mj_step(model, data)
         joint_history.append(data.ctrl.copy())
 
-    return fitness_function(tracker.history["xpos"][0])
+    return fitness_function(tracker.history["xpos"][0], robot_graph)
 
 
 def experiment(robot_graph: Any) -> np.ndarray:
@@ -239,13 +266,14 @@ def experiment(robot_graph: Any) -> np.ndarray:
 
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
-    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=100)
+    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=200)
+
 
     def objective(x):
-        return -evaluate(x, robot_graph)
+        return evaluate(x, robot_graph)
 
     recommendation = optimizer.minimize(objective)
-    print("Best fitness:", -objective(recommendation.value))
+    print("Best fitness:", objective(recommendation.value))
     return recommendation.value
 
 
@@ -283,14 +311,14 @@ def main() -> None:
     model = world.spec.compile()
     data = mj.MjData(model)
     mj.mj_resetData(model, data)
-
+    mj.mj_forward(model, data)
     tracker = Tracker(mujoco_obj_to_find=mj.mjtObj.mjOBJ_GEOM, name_to_bind="core")
     tracker.setup(world.spec, data)
-    tracker.update(data)
 
     input_size = len(data.qpos) + len(data.qvel) + 2
     neural_net = NeuralController(input_size, 8, model.nu, best_weights)
-    stepwise_ctrl = StepwiseController(neural_net, tracker, ctrl_every=15, save_every=100, alpha=0.8)
+    tracker.update(data)
+    stepwise_ctrl = StepwiseController(neural_net, tracker, ctrl_every=5, save_every=100, alpha=0.1)
     mj.set_mjcb_control(lambda m, d: stepwise_ctrl.step(m, d))
 
     viewer.launch(model=model, data=data)
