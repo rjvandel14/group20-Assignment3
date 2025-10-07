@@ -57,6 +57,7 @@ def fitness_function(history: list[float]) -> float:
     cartesian_distance = np.sqrt(
         (xt - xc) ** 2 + (yt - yc) ** 2 + (zt - zc) ** 2,
     )
+
     return -cartesian_distance
 
 def fitness(history: list[float], joint_history):
@@ -193,9 +194,9 @@ class StepwiseController:
 def evaluate(weights, robot_graph):
     world = OlympicArena()
     mj.set_mjcb_control(None)
-    #robot = construct_mjspec_from_graph(robot_graph)
-    robot = gecko()
-    world.spawn(robot.spec, spawn_position=[-0.8,0,0.1])
+    robot = construct_mjspec_from_graph(robot_graph)
+    #robot = gecko()
+    world.spawn(robot.spec, spawn_position=[-0.8, 0.0, 0.1])
 
     model = world.spec.compile()
     data = mj.MjData(model)
@@ -218,15 +219,15 @@ def evaluate(weights, robot_graph):
         mj.mj_step(model, data)
         joint_history.append(data.ctrl.copy())
 
-    return fitness(tracker.history["xpos"][0], joint_history)
+    return fitness_function(tracker.history["xpos"][0])
 
 
 def experiment(robot_graph: Any) -> np.ndarray:
     mj.set_mjcb_control(None)
-    #robot = construct_mjspec_from_graph(robot_graph)
-    robot = gecko()
+    robot = construct_mjspec_from_graph(robot_graph)
+    #robot = gecko()
     world = OlympicArena()
-    world.spawn(robot.spec, spawn_position=[-0.8,0,0.1])
+    world.spawn(robot.spec, spawn_position=[-0.8, 0.0, 0.1])
 
     model = world.spec.compile()
     data = mj.MjData(model)
@@ -238,7 +239,7 @@ def experiment(robot_graph: Any) -> np.ndarray:
 
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
-    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=1500)
+    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=100)
 
     def objective(x):
         return -evaluate(x, robot_graph)
@@ -271,20 +272,21 @@ def main() -> None:
         p_matrices[2],
     )
     save_graph_as_json(robot_graph, DATA / "robot_graph.json")
-    #core = construct_mjspec_from_graph(robot_graph)
-    core = gecko()
+    core = construct_mjspec_from_graph(robot_graph)
+    #core = gecko()
 
     mj.set_mjcb_control(None)
     best_weights = experiment(robot_graph)
 
     world = OlympicArena()
-    world.spawn(core.spec, spawn_position=[-0.8,0,0.1])
+    world.spawn(core.spec, spawn_position=[-0.8, 0.0, 0.1])
     model = world.spec.compile()
     data = mj.MjData(model)
     mj.mj_resetData(model, data)
 
     tracker = Tracker(mujoco_obj_to_find=mj.mjtObj.mjOBJ_GEOM, name_to_bind="core")
     tracker.setup(world.spec, data)
+    tracker.update(data)
 
     input_size = len(data.qpos) + len(data.qvel) + 2
     neural_net = NeuralController(input_size, 8, model.nu, best_weights)
