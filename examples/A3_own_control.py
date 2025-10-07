@@ -13,6 +13,8 @@ from mujoco import viewer
 import random
 import nevergrad as ng
 
+import time
+
 # Local libraries
 from ariel.body_phenotypes.robogen_lite.constructor import (
     construct_mjspec_from_graph,
@@ -29,6 +31,8 @@ from ariel.utils.renderers import single_frame_renderer, video_renderer
 from ariel.utils.runners import simple_runner
 from ariel.utils.tracker import Tracker
 from ariel.utils.video_recorder import VideoRecorder
+
+from body_opt import optimize_body_de, build_robot
 
 # Type Checking
 if TYPE_CHECKING:
@@ -116,8 +120,6 @@ def show_xpos_history(history: list[float]) -> None:
 
     # Show results
     plt.show()
-
-
 
 def random_move(
     model: mj.MjModel,
@@ -219,41 +221,106 @@ def fitness(to_track, joint_history):
 
     return fitness
 
-
 def experiment(robot_graph: Any, mode: ViewerTypes = "viewer") -> np.ndarray:
-    """Run the simulation with optimizer to find best weights."""
-    mj.set_mjcb_control(None)  # DO NOT REMOVE
+    print("\n=== [CTRL] START INNER CONTROLLER OPTIMIZATION ===", flush=True)
+    mj.set_mjcb_control(None)
+
     robot = construct_mjspec_from_graph(robot_graph)
-    # Create world and spawn robot
-    # robot=gecko()
     world = OlympicArena()
     world.spawn(robot.spec, spawn_position=[0, 0, 0.1])
 
-    # Compile full world (includes robot)
     model = world.spec.compile()
     data = mj.MjData(model)
     mj.mj_resetData(model, data)
 
-    # Neural controller setup
+    # (Optional) stability knobs
+    model.opt.timestep = 0.002
+    model.opt.iterations = max(model.opt.iterations, 50)
+    model.opt.ls_iterations = max(model.opt.ls_iterations, 50)
+
     input_size = len(data.qpos) + len(data.qvel) + 2
     hidden_size = 8
     output_size = model.nu
     dummy_net = NeuralController(input_size, hidden_size, output_size)
     num_params = dummy_net.num_params
 
-    # Nevergrad optimizer
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
-    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=200)
+    optimizer = ng.optimizers.CMA(parametrization=parametrization, budget=200)
 
-    # Objective function
+    eval_count = 0
+    best_so_far = -1e18
+    t0 = time.time()
+
     def objective(x):
-        return -evaluate(x, robot_graph)  # evaluate uses world + compiled model
+        nonlocal eval_count, best_so_far
+        vec = x.value if hasattr(x, "value") else np.asarray(x, dtype=np.float32)
+        fit = float(evaluate(vec, robot_graph))  # positive
+        eval_count += 1
+        if fit > best_so_far:
+            best_so_far = fit
+            print(f"[CTRL] EVAL {eval_count} → NEW BEST = {best_so_far:.4f}", flush=True)
+        elif eval_count % 10 == 0:
+            print(f"[CTRL] EVAL {eval_count} → CURR FIT = {fit:.4f} | BEST = {best_so_far:.4f}", flush=True)
+        return float(-fit)  # Nevergrad minimizes
 
-    # Run optimization
+
+    # --- Run optimization ---
     recommendation = optimizer.minimize(objective)
-    print("Best fitness:", -objective(recommendation.value))
-    return recommendation.value
+
+    # --- Robustly compute best fitness & return weights ---
+    elapsed = time.time() - t0
+
+    # Always extract the raw numpy weights (Nevergrad Array has .value)
+    best_w = recommendation.value if hasattr(recommendation, "value") else recommendation
+
+    # If NG did not store a loss (or it’s not finite), evaluate once ourselves
+    if getattr(recommendation, "loss", None) is None or not np.isfinite(recommendation.loss):
+        best_fitness = float(evaluate(best_w, robot_graph))
+    else:
+        best_fitness = float(-recommendation.loss)
+
+    print(f"=== [CTRL] DONE | EVALS: {eval_count} | BEST_FIT = {best_fitness:.4f} | WALL-TIME: {elapsed:.1f}s ===\n", flush=True)
+    return best_w  # <- return numpy weights, not the NG candidate
+
+def score_robot_graph(robot_graph) -> float:
+    print("[SCORE] START CONTROLLER SEARCH FOR CURRENT BODY", flush=True)
+    best_w = experiment(robot_graph, mode="simple")          # returns numpy array after the patch
+    fit = float(evaluate(best_w, robot_graph))               # cast to float
+    print(f"[SCORE] FINISHED FOR BODY | FITNESS = {fit:.4f}", flush=True)
+    return fit
+
+from body_opt import optimize_body_de, build_robot
+
+def run_body_search_then_view():
+    print("=== [MAIN] START BODY SEARCH WITH DE ===", flush=True)
+    res = optimize_body_de(controller_eval_fn=score_robot_graph, pop_budget=60)
+
+    print(f"=== [MAIN] DE COMPLETE | EST. BEST BODY FITNESS = {res['best_fitness_est']:.4f} ===", flush=True)
+    print(f"=== [MAIN] BEST GRAPH SAVED AT: {res['graph_path']} ===", flush=True)
+
+    best_genome = [np.array(x, np.float32) for x in res["best_genome"]]
+    best_graph, best_module = build_robot(best_genome)
+
+    print("[MAIN] RETRAINING CONTROLLER ON BEST BODY (BIGGER BUDGET)…", flush=True)
+    best_w = experiment(best_graph, mode="simple")
+    final_fit = float(evaluate(best_w, best_graph))
+    print(f"=== [MAIN] FINAL CONTROLLER FITNESS ON BEST BODY = {final_fit:.4f} ===", flush=True)
+
+    # View
+    world = OlympicArena()
+    world.spawn(best_module.spec, spawn_position=[0, 0, 0.1])
+    model = world.spec.compile()
+    data = mj.MjData(model)
+    geoms = world.spec.worldbody.find_all(mj.mjtObj.mjOBJ_GEOM)
+    to_track = [data.bind(g) for g in geoms if "core" in g.name]
+
+    input_size = len(data.qpos) + len(data.qvel) + 2
+    net = NeuralController(input_size, 8, model.nu, best_w)
+    HISTORY.clear()
+    mj.set_mjcb_control(lambda m, d: controller(m, d, to_track, net))
+    viewer.launch(model=model, data=data)
+    show_xpos_history(HISTORY)
 
 
 def main() -> None:
@@ -310,4 +377,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_body_search_then_view()
+    #main()
