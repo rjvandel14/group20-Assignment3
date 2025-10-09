@@ -475,7 +475,7 @@ def main() -> None:
     best_graph, best_weights, best_fit = evolve_mu_plus_lambda(
         genotype_size=genotype_size,
         callbacks=callbacks,
-        cfg=ESConfig(gens=4, mu=8, lam=24, sigma_init=0.15, prescreen_retries=3, seed=SEED),
+        cfg=ESConfig(gens=4, mu=4, lam=8, sigma_init=0.15, prescreen_retries=3, seed=SEED),
         initial_parents=[smoke_vec],
     )
     print(f"[FINAL] best fitness: {best_fit:.4f}")
