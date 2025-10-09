@@ -12,6 +12,8 @@ import numpy.typing as npt
 from mujoco import viewer
 import random
 import nevergrad as ng
+
+import time
 from networkx import Graph
 
 # Local libraries
@@ -32,6 +34,8 @@ from ariel.ec.genotypes.nde import NeuralDevelopmentalEncoding
 from ariel.body_phenotypes.robogen_lite.modules.brick import BrickModule
 from ariel.simulation.environments import OlympicArena
 from ariel.utils.tracker import Tracker
+
+from body_opt import optimize_body_de, build_robot
 
 # Type Checking
 if TYPE_CHECKING:
@@ -161,6 +165,22 @@ def show_xpos_history(history: list[float]) -> None:
 
     # Show results
     plt.show()
+
+def random_move(
+    model: mj.MjModel,
+    data: mj.MjData,
+) -> npt.NDArray[np.float64]:
+    # Get the number of joints
+    num_joints = model.nu
+
+    # Hinges take values between -pi/2 and pi/2
+    hinge_range = np.pi / 2
+    return RNG.uniform(
+        low=-hinge_range,  # -pi/2
+        high=hinge_range,  # pi/2
+        size=num_joints,
+    ).astype(np.float64)
+
 
 class NeuralController:
     def __init__(self, input_size, hidden_size, output_size, weights=None):
@@ -350,4 +370,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_body_search_then_view()
+    #main()
