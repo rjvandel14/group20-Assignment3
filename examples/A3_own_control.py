@@ -52,9 +52,9 @@ CWD = Path.cwd()
 DATA = CWD / "__data__" / SCRIPT_NAME
 DATA.mkdir(exist_ok=True)
 SPAWN_POS = [
-        [-1, 0.0, 0.1],
-        [1.0, 0.0, 0.1],
-        [3, 0.0, 0.1],
+        [-1, 0.0, 0.2],
+        [1.0, 0.0, 0.2],
+        [3, 0.0, 0.2],
     ]
 
 NUM_OF_MODULES = 30
@@ -247,7 +247,6 @@ def experiment(robot_graph: Any, penalty) -> np.ndarray:
     world = OlympicArena()
     world.spawn(robot.spec, spawn_position=SPAWN_POS[0])
 
-    # Compile model that actually contains the robot to get correct qpos/qvel sizes
     model_tmp = world.spec.compile()
     data_tmp = mj.MjData(model_tmp)
     mj.mj_resetData(model_tmp, data_tmp)
@@ -262,7 +261,13 @@ def experiment(robot_graph: Any, penalty) -> np.ndarray:
     optimizer = ng.optimizers.CMA(parametrization=num_params, budget=600)
 
     spawn_positions = SPAWN_POS
+
+    # Track the best value found so far
+    best_score_so_far = float("inf")
+    weights_path = DATA / "best_weights.csv"
+
     def objective(x):
+        nonlocal best_score_so_far
         weights = np.asarray(x)
         scores = []
         for sp in spawn_positions:
@@ -272,11 +277,18 @@ def experiment(robot_graph: Any, penalty) -> np.ndarray:
                 print("Evaluation error at spawn", sp, ":", e)
                 f = 1e6
             scores.append(f)
+        score = float(np.mean(scores))
 
-        return float(np.mean(scores))
+        # If this candidate is better, save weights and print
+        if score < best_score_so_far:
+            best_score_so_far = score
+            np.savetxt(weights_path, weights, delimiter=",")
+            print(f"New best score: {score:.4f} – weights saved to {weights_path}")
+
+        return score
 
     recommendation = optimizer.minimize(objective)
-    print("Best aggregated fitness:", objective(recommendation.value))
+    print("Best aggregated fitness after full evolution:", objective(recommendation.value))
     return recommendation.value
 
 
