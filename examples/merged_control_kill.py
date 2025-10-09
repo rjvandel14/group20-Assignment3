@@ -62,10 +62,10 @@ NUM_OF_MODULES = 30
 TARGET_POSITION = [5, 0, 0.5]
 
 # non-learner test values
-time_active_phase = 6.0   # active phase to see if we should kill
-max_retries = 100    # how many bodies we retry before giving up
-settle_time = 2.0    # let it fall/settle for a second
-joint_kicks = 0.5    # strength of joint kicks during test
+NONLEANER_SECONDS = 4.0   # active phase to see if we should kill
+MAX_BODY_RETRIES = 10    # how many bodies we retry before giving up
+SETTLE_SECONDS = 1.5   # let it fall/settle for a second
+KICK_SCALE = 0.7    # strength of joint kicks during test
 
 def make_decode_from_vec(num_modules: int, genotype_size: int):
     def decode_from_vec(vec: np.ndarray):
@@ -383,14 +383,14 @@ def is_learning(robot_graph) -> tuple[bool, float, float]:
         return (False, 0.0, 0.0)
 
     # thresholds (your fixed ones)
-    min_move = 0.07    # 7 cm displacement over active phase
-    min_speed = 0.05   # 5 cm/s RMS over last 1 s
+    dt = model.opt.timestep
+    MIN_DX = 0.02    # 7 cm displacement over active phase
+    MIN_V_RMS = 0.01   # 5 cm/s RMS over last 1 s
 
     # timing
     dt = model.opt.timestep # get simulation time step
-    settle_steps = max(1, int(settle_time / dt)) # how many steps in the settling phase
-    active_steps = max(1, int(time_active_phase / dt)) # how many steps in the active test phase
-
+    settle_steps = max(1, int(SETTLE_SECONDS / dt)) # how many steps in the settling phase
+    active_steps = max(1, int(NONLEANER_SECONDS / dt)) # how many steps in the active test phase
 
     # phase 1: settle
     data.ctrl[:] = 0.0
@@ -405,8 +405,9 @@ def is_learning(robot_graph) -> tuple[bool, float, float]:
 
     # phase 2: active phase - movement test
     # apply random movements in joints to see if robot is capable of moving
+
     for _ in range(active_steps):
-        data.ctrl[:] = joint_kicks * random_move(model, data) # random control signal to every joint
+        data.ctrl[:] = KICK_SCALE * random_move(model, data) # random control signal to every joint
         mj.mj_step(model, data) # react to applied torques
         cur_xy = np.array(core_bind.xpos[:2], dtype=float) # xy-position in this step
         speed = np.linalg.norm(cur_xy - prev_xy) / dt # how fast robot moved in this step
@@ -419,11 +420,11 @@ def is_learning(robot_graph) -> tuple[bool, float, float]:
     speed_end = float(np.sqrt(np.mean(np.square(v_hist[-last_1s:]))) if v_hist else 0.0)
 
     # pass rule (your AND rule)
-    passed = floor_contact and ((dx >= min_move) or (speed_end >= min_speed))
+    passed = floor_contact and ((dx >= MIN_DX) or (speed_end >= MIN_V_RMS))
 
     status = "robot passed" if passed else "killed"
     print(f"[non-learner filter] {status} | dx={dx:.4f} m, speed_end={speed_end:.4f} m/s "
-          f"(need contact & (distance≥{min_move:.3f} AND speed_end≥{min_speed:.3f}))")
+          f"(need contact & (distance≥{MIN_DX:.3f} AND speed_end≥{MIN_V_RMS:.3f}))")
     return (passed, dx, speed_end)
 
 # generating new bodies until one passes the non-learner test
@@ -431,7 +432,7 @@ def sample_robot_nonlearner(num_modules: int, genotype_size: int) -> tuple["DiGr
     nde = NeuralDevelopmentalEncoding(number_of_modules=num_modules)
     hpd = HighProbabilityDecoder(num_modules)
 
-    for attempt in range(1, max_retries + 1):
+    for attempt in range(1, MAX_BODY_RETRIES + 1):
         # random genotype
         type_p_genes = RNG.random(genotype_size).astype(np.float32)
         conn_p_genes = RNG.random(genotype_size).astype(np.float32)
