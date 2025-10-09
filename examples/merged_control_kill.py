@@ -1,4 +1,4 @@
-"""Assignment 3 template code with Stepwise Controller."""
+"""Assignment 3 template code with Stepwise Controller + non-learner prescreen."""
 
 # Standard library
 from pathlib import Path
@@ -12,8 +12,6 @@ import numpy.typing as npt
 from mujoco import viewer
 import random
 import nevergrad as ng
-
-import time
 from networkx import Graph
 
 # Local libraries
@@ -34,8 +32,6 @@ from ariel.ec.genotypes.nde import NeuralDevelopmentalEncoding
 from ariel.body_phenotypes.robogen_lite.modules.brick import BrickModule
 from ariel.simulation.environments import OlympicArena
 from ariel.utils.tracker import Tracker
-
-from body_opt import optimize_body_de, build_robot
 
 # Type Checking
 if TYPE_CHECKING:
@@ -58,6 +54,12 @@ DATA.mkdir(exist_ok=True)
 SPAWN_POS = [-0.8, 0.0, 0.1]
 NUM_OF_MODULES = 30
 TARGET_POSITION = [5, 0, 0.5]
+
+# non-learner test values
+NONLEARNER_SECONDS = 4.0   # active phase to see if we should kill
+MAX_BODY_RETRIES = 10      # how many bodies we retry before giving up
+SETTLE_SECONDS = 1.5       # let it fall/settle for a second
+KICK_SCALE = 0.7           # strength of joint kicks during test
 
 def count_from_graph(graph: Graph, name) -> int:
     count = 0
@@ -89,21 +91,18 @@ def fitness_function(history: list[float], graph: Graph) -> float:
     if ratio > 1:
         arch_penalty = 0.3
 
-    return cartesian_distance+arch_penalty*ratio
+    return cartesian_distance + arch_penalty * ratio
 
 def fitness(history: list[float], joint_history):
     final_pos = history[-1]
-    displacement_y = abs(final_pos[1])  
-    displacement_x = final_pos[0] 
+    displacement_y = abs(final_pos[1])
+    displacement_x = final_pos[0]
 
-    oscillation_reward = np.mean(np.std(joint_history, axis=0)) # variation of the joint angles
+    oscillation_reward = np.mean(np.std(joint_history, axis=0))
+    saturation_penalty = np.mean(np.abs(np.abs(joint_history) - (np.pi / 2)))
 
-    saturation_penalty = np.mean(np.abs(np.abs(joint_history) - (np.pi / 2))) # to avoid getting stuck on max or min joint angles
-
-    fitness = displacement_x + 0.08 * oscillation_reward - 0.08 * saturation_penalty - 0.3*displacement_y
-
+    fitness = displacement_x + 0.08 * oscillation_reward - 0.08 * saturation_penalty - 0.3 * displacement_y
     return fitness
-
 
 def show_xpos_history(history: list[float]) -> None:
     # Create a tracking camera
@@ -170,22 +169,6 @@ def show_xpos_history(history: list[float]) -> None:
     # Show results
     plt.show()
 
-def random_move(
-    model: mj.MjModel,
-    data: mj.MjData,
-) -> npt.NDArray[np.float64]:
-    # Get the number of joints
-    num_joints = model.nu
-
-    # Hinges take values between -pi/2 and pi/2
-    hinge_range = np.pi / 2
-    return RNG.uniform(
-        low=-hinge_range,  # -pi/2
-        high=hinge_range,  # pi/2
-        size=num_joints,
-    ).astype(np.float64)
-
-
 class NeuralController:
     def __init__(self, input_size, hidden_size, output_size, weights=None):
         self.input_size = input_size
@@ -209,8 +192,7 @@ class NeuralController:
 
         return outputs.reshape(self.output_size)
 
-
-# --- Stepwise Controller --- #
+# Stepwise Controller
 class StepwiseController:
     def __init__(self, neural_net, tracker, ctrl_every=50, save_every=100, alpha=0.1):
         self.neural_net = neural_net
@@ -237,13 +219,12 @@ class StepwiseController:
             target_angles = output * (np.pi / 2)
             data.ctrl[:] = (1 - self.alpha) * data.ctrl[:] + self.alpha * target_angles
 
-
 def evaluate(weights, robot_graph):
     world = OlympicArena()
     mj.set_mjcb_control(None)
     robot = construct_mjspec_from_graph(robot_graph)
-    #robot = gecko()
-    world.spawn(robot.spec, spawn_position=[-0.8, 0.0, 0.1])
+    # robot = gecko()
+    world.spawn(robot.spec, spawn_position=SPAWN_POS)
 
     model = world.spec.compile()
     data = mj.MjData(model)
@@ -266,29 +247,14 @@ def evaluate(weights, robot_graph):
         mj.mj_step(model, data)
         joint_history.append(data.ctrl.copy())
 
-    joint_history = np.array(joint_history)
-    return fitness(to_track, joint_history)
-
-def fitness(to_track, joint_history):
-    final_pos = to_track[0].xpos.copy()
-    displacement_y = abs(final_pos[1])  
-    displacement_x = final_pos[0] 
-
-    oscillation_reward = np.mean(np.std(joint_history, axis=0)) # variation of the joint angles
-
-    saturation_penalty = np.mean(np.abs(np.abs(joint_history) - (np.pi / 2))) # to avoid getting stuck on max or min joint angles
-
-    fitness = displacement_x + 0.08 * oscillation_reward - 0.08 * saturation_penalty - 0.3*displacement_y
-
-    return fitness
-
+    return fitness_function(tracker.history["xpos"][0], robot_graph)
 
 def experiment(robot_graph: Any) -> np.ndarray:
     mj.set_mjcb_control(None)
     robot = construct_mjspec_from_graph(robot_graph)
-    #robot = gecko()
+    # robot = gecko()
     world = OlympicArena()
-    world.spawn(robot.spec, spawn_position=[-0.8, 0.0, 0.1])
+    world.spawn(robot.spec, spawn_position=SPAWN_POS)
 
     model = world.spec.compile()
     data = mj.MjData(model)
@@ -300,48 +266,128 @@ def experiment(robot_graph: Any) -> np.ndarray:
 
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
-    optimizer = ng.optimizers.CMA(parametrization=parametrization, budget=200)
-
+    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=200)
 
     def objective(x):
+        # minimize distance+penalty (your fitness_function returns lower=better)
         return evaluate(x, robot_graph)
 
     recommendation = optimizer.minimize(objective)
     print("Best fitness:", objective(recommendation.value))
     return recommendation.value
 
+# non-learner test: test if robot can move and otherwise kill-off robot
+def random_move(model: mj.MjModel, data: mj.MjData) -> npt.NDArray[np.float64]:
+    num_joints = model.nu
+    hinge_range = np.pi / 2 # hinges take values between -pi/2 and pi/2
+    return RNG.uniform(
+        low=-hinge_range, # -pi/2
+        high=hinge_range, # pi/2
+        size=num_joints
+    ).astype(np.float64)
+
+def is_learning(robot_graph) -> tuple[bool, float, float]:
+    mj.set_mjcb_control(None)
+    world = OlympicArena()
+    robot = construct_mjspec_from_graph(robot_graph)
+    world.spawn(robot.spec, spawn_position=SPAWN_POS)
+    model = world.spec.compile()
+    data = mj.MjData(model)
+    mj.mj_resetData(model, data)
+    mj.mj_forward(model, data)
+
+    # find core and track movement in xy-plane
+    geoms = world.spec.worldbody.find_all(mj.mjtObj.mjOBJ_GEOM)
+    core_bind = next((data.bind(g) for g in geoms if "core" in g.name), None)
+    if core_bind is None:
+        return (False, 0.0, 0.0)
+
+    dt = model.opt.timestep # get simulation time step
+    MIN_DX = 0.02 + 0.01 * (dt / 0.002) # approx 2–3 cm, robot must move at least a few centimeters
+    MIN_V_RMS = 0.01 * (0.002 / dt) # approx 1 cm/s over last 1 s, robot must show some speed
+
+    settle_steps = max(1, int(SETTLE_SECONDS / dt)) # how many steps in the settling phase
+    active_steps = max(1, int(NONLEARNER_SECONDS / dt)) # how many steps in the active test phase
+
+    # phase 1: settle (no control), let it fall and stabilize
+    data.ctrl[:] = 0.0
+    for _ in range(settle_steps):
+        mj.mj_step(model, data)
+
+    # initial xy position
+    start_xy = np.array(core_bind.xpos[:2], dtype=float)
+    prev_xy = start_xy.copy()
+    v_hist: list[float] = []
+    floor_contact = False
+
+    # phase 2: active phase - movement test
+    # apply random movements in joints to see if robot is capable of moving
+    for _ in range(active_steps):
+        data.ctrl[:] = KICK_SCALE * random_move(model, data) # random control signal to every joint
+        mj.mj_step(model, data) # react to applied torques
+        cur_xy = np.array(core_bind.xpos[:2], dtype=float) # xy-position in this step
+        speed = np.linalg.norm(cur_xy - prev_xy) / dt # how fast robot moved in this step
+        v_hist.append(speed)
+        floor_contact |= (data.ncon > 0) # at least one contact with floor
+        prev_xy = cur_xy
+
+    dx = float(np.linalg.norm(prev_xy - start_xy)) # how far robot moved during active phase
+    last_1s = max(1, int(1.0 / dt)) # how many simulation steps correspond to 1 second
+    v_rms = float(np.sqrt(np.mean(np.square(v_hist[-last_1s:])))) if v_hist else 0.0 # average of how much robot moving near end of test
+
+    # passed if touched the ground, moved far enough and fast enough
+    passed = floor_contact and ((dx >= MIN_DX) or (v_rms >= MIN_V_RMS))
+
+    status = "KEPT " if passed else "KILLED"
+    print(
+        f"[non-learner filter] {status} | "
+        f"dx={dx:.4f} m, v_rms={v_rms:.4f} m/s "
+        f"(need contact & (dx≥{MIN_DX:.3f} OR v_rms≥{MIN_V_RMS:.3f}))"
+    )
+    return (passed, dx, v_rms)
+
+# generating new bodies until one passes the non-learner test
+def sample_robot_nonlearner(num_modules: int, genotype_size: int) -> "DiGraph":
+    nde = NeuralDevelopmentalEncoding(number_of_modules=num_modules)
+    hpd = HighProbabilityDecoder(num_modules)
+
+    for attempt in range(1, MAX_BODY_RETRIES + 1):
+        # random genotype
+        type_p_genes = RNG.random(genotype_size).astype(np.float32)
+        conn_p_genes = RNG.random(genotype_size).astype(np.float32)
+        rot_p_genes  = RNG.random(genotype_size).astype(np.float32)
+        genotype = [type_p_genes, conn_p_genes, rot_p_genes]
+
+        # decode robot
+        p_matrices = nde.forward(genotype)
+        robot_graph = hpd.probability_matrices_to_graph(
+            p_matrices[0], p_matrices[1], p_matrices[2]
+        )
+
+        passed, dx, v_rms = is_learning(robot_graph)
+        print(f"[attempt {attempt:02d}] {'OK' if passed else 'retry'} (dx={dx:.3f}, v_rms={v_rms:.3f})")
+
+        if passed:
+            return robot_graph
+
+    raise RuntimeError(f"Failed to sample a learner body in {MAX_BODY_RETRIES} attempts")
+# end non-learner test
 
 def main() -> None:
     genotype_size = 64
-    type_p_genes = RNG.random(genotype_size).astype(np.float32)
-    conn_p_genes = RNG.random(genotype_size).astype(np.float32)
-    rot_p_genes = RNG.random(genotype_size).astype(np.float32)
 
-    genotype = [
-        type_p_genes,
-        conn_p_genes,
-        rot_p_genes,
-    ]
+    # sample a body that passes the non-learner test
+    robot_graph = sample_robot_nonlearner(num_modules=NUM_OF_MODULES, genotype_size=genotype_size)
 
-    nde = NeuralDevelopmentalEncoding(number_of_modules=NUM_OF_MODULES)
-    p_matrices = nde.forward(genotype)
-
-    # Decode the high-probability graph
-    hpd = HighProbabilityDecoder(NUM_OF_MODULES)
-    robot_graph: DiGraph[Any] = hpd.probability_matrices_to_graph(
-        p_matrices[0],
-        p_matrices[1],
-        p_matrices[2],
-    )
     save_graph_as_json(robot_graph, DATA / "robot_graph.json")
     core = construct_mjspec_from_graph(robot_graph)
-    #core = gecko()
+    # core = gecko()
 
     mj.set_mjcb_control(None)
     best_weights = experiment(robot_graph)
 
     world = OlympicArena()
-    world.spawn(core.spec, spawn_position=[-0.8, 0.0, 0.1])
+    world.spawn(core.spec, spawn_position=SPAWN_POS)
     model = world.spec.compile()
     data = mj.MjData(model)
     mj.mj_resetData(model, data)
@@ -360,7 +406,5 @@ def main() -> None:
     print(tracker.history["xpos"][0])
     show_xpos_history(tracker.history["xpos"][0])
 
-
 if __name__ == "__main__":
-    run_body_search_then_view()
-    #main()
+    main()

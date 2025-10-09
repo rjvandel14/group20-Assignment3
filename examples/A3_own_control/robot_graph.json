@@ -1,0 +1,204 @@
+{
+    "directed": true,
+    "multigraph": false,
+    "graph": {},
+    "nodes": [
+        {
+            "type": "HINGE",
+            "rotation": "DEG_270",
+            "id": 17
+        },
+        {
+            "type": "HINGE",
+            "rotation": "DEG_315",
+            "id": 9
+        },
+        {
+            "type": "CORE",
+            "rotation": "DEG_0",
+            "id": 0
+        },
+        {
+            "type": "BRICK",
+            "rotation": "DEG_135",
+            "id": 14
+        },
+        {
+            "type": "BRICK",
+            "rotation": "DEG_180",
+            "id": 7
+        },
+        {
+            "type": "NONE",
+            "rotation": "DEG_0",
+            "id": 16
+        },
+        {
+            "type": "NONE",
+            "rotation": "DEG_0",
+            "id": 18
+        },
+        {
+            "type": "HINGE",
+            "rotation": "DEG_180",
+            "id": 2
+        },
+        {
+            "type": "BRICK",
+            "rotation": "DEG_135",
+            "id": 3
+        },
+        {
+            "type": "HINGE",
+            "rotation": "DEG_90",
+            "id": 12
+        },
+        {
+            "type": "NONE",
+            "rotation": "DEG_0",
+            "id": 5
+        },
+        {
+            "type": "NONE",
+            "rotation": "DEG_0",
+            "id": 15
+        },
+        {
+            "type": "HINGE",
+            "rotation": "DEG_315",
+            "id": 13
+        },
+        {
+            "type": "HINGE",
+            "rotation": "DEG_315",
+            "id": 19
+        },
+        {
+            "type": "BRICK",
+            "rotation": "DEG_0",
+            "id": 10
+        },
+        {
+            "type": "HINGE",
+            "rotation": "DEG_135",
+            "id": 1
+        },
+        {
+            "type": "HINGE",
+            "rotation": "DEG_0",
+            "id": 4
+        },
+        {
+            "type": "BRICK",
+            "rotation": "DEG_225",
+            "id": 8
+        },
+        {
+            "type": "HINGE",
+            "rotation": "DEG_45",
+            "id": 6
+        },
+        {
+            "type": "BRICK",
+            "rotation": "DEG_315",
+            "id": 11
+        }
+    ],
+    "edges": [
+        {
+            "face": "FRONT",
+            "source": 17,
+            "target": 9
+        },
+        {
+            "face": "FRONT",
+            "source": 9,
+            "target": 3
+        },
+        {
+            "face": "BACK",
+            "source": 0,
+            "target": 17
+        },
+        {
+            "face": "LEFT",
+            "source": 0,
+            "target": 14
+        },
+        {
+            "face": "FRONT",
+            "source": 0,
+            "target": 7
+        },
+        {
+            "face": "FRONT",
+            "source": 14,
+            "target": 16
+        },
+        {
+            "face": "LEFT",
+            "source": 14,
+            "target": 18
+        },
+        {
+            "face": "TOP",
+            "source": 14,
+            "target": 2
+        },
+        {
+            "face": "LEFT",
+            "source": 7,
+            "target": 12
+        },
+        {
+            "face": "BOTTOM",
+            "source": 7,
+            "target": 5
+        },
+        {
+            "face": "RIGHT",
+            "source": 7,
+            "target": 15
+        },
+        {
+            "face": "FRONT",
+            "source": 3,
+            "target": 11
+        },
+        {
+            "face": "FRONT",
+            "source": 12,
+            "target": 13
+        },
+        {
+            "face": "FRONT",
+            "source": 13,
+            "target": 19
+        },
+        {
+            "face": "FRONT",
+            "source": 19,
+            "target": 10
+        },
+        {
+            "face": "LEFT",
+            "source": 10,
+            "target": 1
+        },
+        {
+            "face": "BOTTOM",
+            "source": 10,
+            "target": 4
+        },
+        {
+            "face": "FRONT",
+            "source": 4,
+            "target": 8
+        },
+        {
+            "face": "FRONT",
+            "source": 8,
+            "target": 6
+        }
+    ]
+}
