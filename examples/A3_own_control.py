@@ -51,7 +51,12 @@ SCRIPT_NAME = __file__.split("/")[-1][:-3]
 CWD = Path.cwd()
 DATA = CWD / "__data__" / SCRIPT_NAME
 DATA.mkdir(exist_ok=True)
-SPAWN_POS = [-0.8, 0.0, 0.1]
+SPAWN_POS = [
+        [-1, 0.0, 0.1],
+        [1.0, 0.0, 0.1],
+        [3, 0.0, 0.1],
+    ]
+
 NUM_OF_MODULES = 30
 TARGET_POSITION = [5, 0, 0.5]
 
@@ -69,25 +74,16 @@ def count_from_graph(graph: Graph, name) -> int:
                 count += 1
     return count
 
-def fitness_function(history: list[float], graph: Graph) -> float:
+def fitness_function(history: list[float], penalty) -> float:
     xt, yt, zt = TARGET_POSITION
     xc, yc, zc = history[-1]
 
     cartesian_distance = np.sqrt(
         (xt - xc) ** 2 + (yt - yc) ** 2 + (zt - zc) ** 2,
     )
+    return cartesian_distance+penalty
 
-    num_blocks = count_from_graph(graph, "BRICK")
-    num_hinges = count_from_graph(graph, "HINGE")
-
-    arch_penalty = 0
-    ratio = num_blocks/(num_hinges)
-    if ratio > 1:
-        arch_penalty = 0.3
-
-    return cartesian_distance+arch_penalty*ratio
-
-def fitness(history: list[float], joint_history):
+def fitness(history: list[float], joint_history, ):
     final_pos = history[-1]
     displacement_y = abs(final_pos[1])  
     displacement_x = final_pos[0] 
@@ -136,7 +132,7 @@ def show_xpos_history(history: list[float]) -> None:
     # Calculate initial position
     x0, y0 = int(h * 0.483), int(w * 0.815)
     xc, yc = int(h * 0.483), int(w * 0.9205)
-    ym0, ymc = 0, SPAWN_POS[0]
+    ym0, ymc = 0, SPAWN_POS[1][0]
 
     # Convert position data to pixel coordinates
     pixel_to_dist = -((ymc - ym0) / (yc - y0))
@@ -218,27 +214,27 @@ class StepwiseController:
             data.ctrl[:] = (1 - self.alpha) * data.ctrl[:] + self.alpha * target_angles
 
 
-def evaluate(weights, robot_graph):
+def evaluate(weights, robot_graph, spawn_pos, penalty):
     world = OlympicArena()
     mj.set_mjcb_control(None)
     robot = construct_mjspec_from_graph(robot_graph)
-    #robot = gecko()
-    world.spawn(robot.spec, spawn_position=[-0.8, 0.0, 0.1])
+    world.spawn(robot.spec, spawn_position=spawn_pos)
 
     model = world.spec.compile()
     data = mj.MjData(model)
-    data.qpos[:] = 0.0
-    data.qvel[:] = 0.0
+    mj.mj_resetData(model, data)
+    mj.mj_forward(model, data)
 
+    # Fresh tracker for this run
     tracker = Tracker(mujoco_obj_to_find=mj.mjtObj.mjOBJ_GEOM, name_to_bind="core")
     tracker.setup(world.spec, data)
 
     input_size = len(data.qpos) + len(data.qvel) + 2
     neural_net = NeuralController(input_size, 8, model.nu, weights)
 
-    controller = StepwiseController(neural_net, tracker, ctrl_every=5, save_every=100, alpha=0.8)
+    controller = StepwiseController(neural_net, tracker, ctrl_every=5, save_every=100, alpha=0.1)
 
-    steps = 2500
+    steps = 1500
     joint_history = []
 
     for _ in range(steps):
@@ -246,34 +242,54 @@ def evaluate(weights, robot_graph):
         mj.mj_step(model, data)
         joint_history.append(data.ctrl.copy())
 
-    return fitness_function(tracker.history["xpos"][0], robot_graph)
+    # Return fitness computed from the tracker's recorded xpos
+    return fitness_function(tracker.history["xpos"][0], penalty)
 
 
-def experiment(robot_graph: Any) -> np.ndarray:
+def experiment(robot_graph: Any, penalty) -> np.ndarray:
     mj.set_mjcb_control(None)
+
+    # Construct robot and spawn it into a temporary world so we can compile the correct model
     robot = construct_mjspec_from_graph(robot_graph)
-    #robot = gecko()
     world = OlympicArena()
+    # spawn at one of your training starts so the compiled model includes the robot's DOFs
     world.spawn(robot.spec, spawn_position=[-0.8, 0.0, 0.1])
 
-    model = world.spec.compile()
-    data = mj.MjData(model)
-    mj.mj_resetData(model, data)
+    # Compile model that actually contains the robot to get correct qpos/qvel sizes
+    model_tmp = world.spec.compile()
+    data_tmp = mj.MjData(model_tmp)
+    mj.mj_resetData(model_tmp, data_tmp)
+    mj.mj_forward(model_tmp, data_tmp)
 
-    input_size = len(data.qpos) + len(data.qvel) + 2
-    dummy_net = NeuralController(input_size, 8, model.nu)
+    # input size must match what evaluate() will later compute
+    input_size = len(data_tmp.qpos) + len(data_tmp.qvel) + 2
+    hidden_size = 8
+    output_size = model_tmp.nu
+    dummy_net = NeuralController(input_size, hidden_size, output_size)
     num_params = dummy_net.num_params
 
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
-    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=200)
+    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=1000)
 
-
+    spawn_positions = SPAWN_POS
     def objective(x):
-        return evaluate(x, robot_graph)
+        # convert candidate to numpy array (nevergrad may pass wrapper objects)
+        weights = np.asarray(x)
+
+        scores = []
+        for sp in spawn_positions:
+            try:
+                f = evaluate(weights, robot_graph, sp, penalty)
+            except Exception as e:
+                print("Evaluation error at spawn", sp, ":", e)
+                f = 1e6
+            scores.append(f)
+
+        return float(np.mean(scores))
 
     recommendation = optimizer.minimize(objective)
-    print("Best fitness:", objective(recommendation.value))
+    print("Best aggregated fitness:", objective(recommendation.value))
     return recommendation.value
 
 
@@ -299,15 +315,22 @@ def main() -> None:
         p_matrices[1],
         p_matrices[2],
     )
+    num_blocks = count_from_graph(robot_graph, "BRICK")
+    num_hinges = count_from_graph(robot_graph, "HINGE")
+    
+    penalty = 0
+    ratio = num_blocks/(num_hinges)
+    if ratio > 1:
+        penalty = 0.3
+
     save_graph_as_json(robot_graph, DATA / "robot_graph.json")
     core = construct_mjspec_from_graph(robot_graph)
-    #core = gecko()
 
     mj.set_mjcb_control(None)
-    best_weights = experiment(robot_graph)
+    best_weights = experiment(robot_graph, penalty)
 
     world = OlympicArena()
-    world.spawn(core.spec, spawn_position=[-0.8, 0.0, 0.1])
+    world.spawn(core.spec, spawn_position=SPAWN_POS[1])
     model = world.spec.compile()
     data = mj.MjData(model)
     mj.mj_resetData(model, data)
