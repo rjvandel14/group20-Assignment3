@@ -63,24 +63,6 @@ max_retries = 100    # how many bodies we retry before giving up
 settle_time = 2.0    # let it fall/settle for a second
 joint_kicks = 0.5    # strength of joint kicks during test
 
-def make_decode_from_vec(num_modules: int, genotype_size: int):
-    def decode_from_vec(vec: np.ndarray):
-        nde = NeuralDevelopmentalEncoding(number_of_modules=num_modules)
-        hpd = HighProbabilityDecoder(num_modules)
-        a = np.clip(vec[:genotype_size], 0, 1).astype(np.float32)
-        b = np.clip(vec[genotype_size:2*genotype_size], 0, 1).astype(np.float32)
-        c = np.clip(vec[2*genotype_size:], 0, 1).astype(np.float32)
-        p_mats = nde.forward([a, b, c])
-        return hpd.probability_matrices_to_graph(p_mats[0], p_mats[1], p_mats[2])
-    return decode_from_vec
-
-def cma_train_controller(graph):
-    print("[CMA] starting...")
-    w = experiment(graph)
-    f = evaluate(w, graph)
-    print(f"[CMA] best fitness={f:.4f}")
-    return w, float(f)
-
 def count_from_graph(graph: Graph, name) -> int:
     count = 0
     if name == "BRICK":
@@ -336,10 +318,9 @@ def is_learning(robot_graph) -> tuple[bool, float, float]:
     mj.set_mjcb_control(None)
     world = OlympicArena()
 
-    # robust build
     try:
         robot = construct_mjspec_from_graph(robot_graph)
-    except (ValueError, KeyError) as e:
+    except (ValueError, KeyError) as e:     
         print(f"[non-learner] invalid graph during construct: {type(e).__name__}: {e}")
         return (False, 0.0, 0.0)
 
@@ -355,15 +336,12 @@ def is_learning(robot_graph) -> tuple[bool, float, float]:
     if core_bind is None:
         return (False, 0.0, 0.0)
 
-    # thresholds (your fixed ones)
-    min_move = 0.07    # 7 cm displacement over active phase
-    min_speed = 0.05   # 5 cm/s RMS over last 1 s
+    min_move = 0.07 # approx 7 cm, robot must move at least a few centimeters
+    min_speed = 0.05 # approx 5 cm/s over last 1 s, robot must show some speed
 
-    # timing
     dt = model.opt.timestep # get simulation time step
     settle_steps = max(1, int(settle_time / dt)) # how many steps in the settling phase
     active_steps = max(1, int(time_active_phase / dt)) # how many steps in the active test phase
-
 
     # phase 1: settle
     data.ctrl[:] = 0.0
@@ -387,16 +365,19 @@ def is_learning(robot_graph) -> tuple[bool, float, float]:
         floor_contact |= (data.ncon > 0) # at least one contact with floor
         prev_xy = cur_xy
 
-    dx = float(np.linalg.norm(prev_xy - start_xy))
-    last_1s = max(1, int(1.0 / dt))
-    speed_end = float(np.sqrt(np.mean(np.square(v_hist[-last_1s:]))) if v_hist else 0.0)
+    dx = float(np.linalg.norm(prev_xy - start_xy)) # how far robot moved during active phase
+    last_1s = max(1, int(1.0 / dt)) # how many simulation steps correspond to 1 second
+    speed_end = float(np.sqrt(np.mean(np.square(v_hist[-last_1s:])))) if v_hist else 0.0 # average of how much robot moving near end of test
 
-    # pass rule (your AND rule)
-    passed = floor_contact and ((dx >= min_move) or (speed_end >= min_speed))
+    # passed if touched the ground, moved far enough and fast enough
+    passed = floor_contact and ((dx >= min_move) and (speed_end >= min_speed))
 
-    status = "robot passed" if passed else "killed"
-    print(f"[non-learner filter] {status} | dx={dx:.4f} m, speed_end={speed_end:.4f} m/s "
-          f"(need contact & (distance≥{min_move:.3f} AND speed_end≥{min_speed:.3f}))")
+    status = "robot passed " if passed else "killed"
+    print(
+        f"[non-learner filter] {status} | "
+        f"dx={dx:.4f} m, speed_end={speed_end:.4f} m/s "
+        f"(need contact & (distance≥{min_move:.3f} AND speed_end≥{min_speed:.3f}))"
+    )
     return (passed, dx, speed_end)
 
 # generating new bodies until one passes the non-learner test
