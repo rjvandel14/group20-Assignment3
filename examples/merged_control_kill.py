@@ -55,7 +55,7 @@ SPAWN_POS = [-0.8, 0.0, 0.1]
 NUM_OF_MODULES = 30
 TARGET_POSITION = [5, 0, 0.5]
 
-# --- Non-learner prescreen config (added) ---
+# non-learner test values
 NONLEARNER_SECONDS = 4.0   # active phase to see if we should kill
 MAX_BODY_RETRIES = 10      # how many bodies we retry before giving up
 SETTLE_SECONDS = 1.5       # let it fall/settle for a second
@@ -192,7 +192,7 @@ class NeuralController:
 
         return outputs.reshape(self.output_size)
 
-# --- Stepwise Controller (keep as in Code 1) ---
+# Stepwise Controller
 class StepwiseController:
     def __init__(self, neural_net, tracker, ctrl_every=50, save_every=100, alpha=0.1):
         self.neural_net = neural_net
@@ -276,13 +276,17 @@ def experiment(robot_graph: Any) -> np.ndarray:
     print("Best fitness:", objective(recommendation.value))
     return recommendation.value
 
-# ---------- Non-learner utilities (added) ----------
+# non-learner test: test if robot can move and otherwise kill-off robot
 def random_move(model: mj.MjModel, data: mj.MjData) -> npt.NDArray[np.float64]:
     num_joints = model.nu
-    hinge_range = np.pi / 2
-    return RNG.uniform(low=-hinge_range, high=hinge_range, size=num_joints).astype(np.float64)
+    hinge_range = np.pi / 2 # hinges take values between -pi/2 and pi/2
+    return RNG.uniform(
+        low=-hinge_range, # -pi/2
+        high=hinge_range, # pi/2
+        size=num_joints
+    ).astype(np.float64)
 
-def is_learner(robot_graph) -> tuple[bool, float, float]:
+def is_learning(robot_graph) -> tuple[bool, float, float]:
     mj.set_mjcb_control(None)
     world = OlympicArena()
     robot = construct_mjspec_from_graph(robot_graph)
@@ -292,40 +296,46 @@ def is_learner(robot_graph) -> tuple[bool, float, float]:
     mj.mj_resetData(model, data)
     mj.mj_forward(model, data)
 
+    # find core and track movement in xy-plane
     geoms = world.spec.worldbody.find_all(mj.mjtObj.mjOBJ_GEOM)
     core_bind = next((data.bind(g) for g in geoms if "core" in g.name), None)
     if core_bind is None:
         return (False, 0.0, 0.0)
 
-    dt = model.opt.timestep
-    MIN_DX = 0.02 + 0.01 * (dt / 0.002)
-    MIN_V_RMS = 0.01 * (0.002 / dt)
+    dt = model.opt.timestep # get simulation time step
+    MIN_DX = 0.02 + 0.01 * (dt / 0.002) # approx 2–3 cm, robot must move at least a few centimeters
+    MIN_V_RMS = 0.01 * (0.002 / dt) # approx 1 cm/s over last 1 s, robot must show some speed
 
-    settle_steps = max(1, int(SETTLE_SECONDS / dt))
-    active_steps = max(1, int(NONLEARNER_SECONDS / dt))
+    settle_steps = max(1, int(SETTLE_SECONDS / dt)) # how many steps in the settling phase
+    active_steps = max(1, int(NONLEARNER_SECONDS / dt)) # how many steps in the active test phase
 
+    # phase 1: settle (no control), let it fall and stabilize
     data.ctrl[:] = 0.0
     for _ in range(settle_steps):
         mj.mj_step(model, data)
 
+    # initial xy position
     start_xy = np.array(core_bind.xpos[:2], dtype=float)
     prev_xy = start_xy.copy()
     v_hist: list[float] = []
     floor_contact = False
 
+    # phase 2: active phase - movement test
+    # apply random movements in joints to see if robot is capable of moving
     for _ in range(active_steps):
-        data.ctrl[:] = KICK_SCALE * random_move(model, data)
-        mj.mj_step(model, data)
-        cur_xy = np.array(core_bind.xpos[:2], dtype=float)
-        speed = np.linalg.norm(cur_xy - prev_xy) / dt
+        data.ctrl[:] = KICK_SCALE * random_move(model, data) # random control signal to every joint
+        mj.mj_step(model, data) # react to applied torques
+        cur_xy = np.array(core_bind.xpos[:2], dtype=float) # xy-position in this step
+        speed = np.linalg.norm(cur_xy - prev_xy) / dt # how fast robot moved in this step
         v_hist.append(speed)
-        floor_contact |= (data.ncon > 0)
+        floor_contact |= (data.ncon > 0) # at least one contact with floor
         prev_xy = cur_xy
 
-    dx = float(np.linalg.norm(prev_xy - start_xy))
-    last_1s = max(1, int(1.0 / dt))
-    v_rms = float(np.sqrt(np.mean(np.square(v_hist[-last_1s:])))) if v_hist else 0.0
+    dx = float(np.linalg.norm(prev_xy - start_xy)) # how far robot moved during active phase
+    last_1s = max(1, int(1.0 / dt)) # how many simulation steps correspond to 1 second
+    v_rms = float(np.sqrt(np.mean(np.square(v_hist[-last_1s:])))) if v_hist else 0.0 # average of how much robot moving near end of test
 
+    # passed if touched the ground, moved far enough and fast enough
     passed = floor_contact and ((dx >= MIN_DX) or (v_rms >= MIN_V_RMS))
 
     status = "KEPT " if passed else "KILLED"
@@ -336,36 +346,38 @@ def is_learner(robot_graph) -> tuple[bool, float, float]:
     )
     return (passed, dx, v_rms)
 
-def sample_learner_robot_graph(num_modules: int, genotype_size: int) -> "DiGraph":
+# generating new bodies until one passes the non-learner test
+def sample_robot_nonlearner(num_modules: int, genotype_size: int) -> "DiGraph":
     nde = NeuralDevelopmentalEncoding(number_of_modules=num_modules)
     hpd = HighProbabilityDecoder(num_modules)
 
     for attempt in range(1, MAX_BODY_RETRIES + 1):
+        # random genotype
         type_p_genes = RNG.random(genotype_size).astype(np.float32)
         conn_p_genes = RNG.random(genotype_size).astype(np.float32)
         rot_p_genes  = RNG.random(genotype_size).astype(np.float32)
         genotype = [type_p_genes, conn_p_genes, rot_p_genes]
 
+        # decode robot
         p_matrices = nde.forward(genotype)
         robot_graph = hpd.probability_matrices_to_graph(
             p_matrices[0], p_matrices[1], p_matrices[2]
         )
 
-        passed, dx, v_rms = is_learner(robot_graph)
+        passed, dx, v_rms = is_learning(robot_graph)
         print(f"[attempt {attempt:02d}] {'OK' if passed else 'retry'} (dx={dx:.3f}, v_rms={v_rms:.3f})")
 
         if passed:
             return robot_graph
 
     raise RuntimeError(f"Failed to sample a learner body in {MAX_BODY_RETRIES} attempts")
-# ---------- end non-learner utilities ----------
+# end non-learner test
 
 def main() -> None:
     genotype_size = 64
 
-    # BEFORE: decode once from random genotype
-    # NOW: sample a body that passes the non-learner prescreen (only change)
-    robot_graph = sample_learner_robot_graph(num_modules=NUM_OF_MODULES, genotype_size=genotype_size)
+    # sample a body that passes the non-learner test
+    robot_graph = sample_robot_nonlearner(num_modules=NUM_OF_MODULES, genotype_size=genotype_size)
 
     save_graph_as_json(robot_graph, DATA / "robot_graph.json")
     core = construct_mjspec_from_graph(robot_graph)
