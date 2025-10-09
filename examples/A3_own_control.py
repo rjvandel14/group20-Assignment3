@@ -185,10 +185,8 @@ class NeuralController:
 
         return outputs.reshape(self.output_size)
 
-
-# --- Stepwise Controller --- #
 class StepwiseController:
-    def __init__(self, neural_net, tracker, ctrl_every=50, save_every=100, alpha=0.1):
+    def __init__(self, neural_net, tracker, ctrl_every=5, save_every=100, alpha=0.1):
         self.neural_net = neural_net
         self.tracker = tracker
         self.ctrl_every = ctrl_every
@@ -213,7 +211,6 @@ class StepwiseController:
             target_angles = output * (np.pi / 2)
             data.ctrl[:] = (1 - self.alpha) * data.ctrl[:] + self.alpha * target_angles
 
-
 def evaluate(weights, robot_graph, spawn_pos, penalty):
     world = OlympicArena()
     mj.set_mjcb_control(None)
@@ -225,7 +222,6 @@ def evaluate(weights, robot_graph, spawn_pos, penalty):
     mj.mj_resetData(model, data)
     mj.mj_forward(model, data)
 
-    # Fresh tracker for this run
     tracker = Tracker(mujoco_obj_to_find=mj.mjtObj.mjOBJ_GEOM, name_to_bind="core")
     tracker.setup(world.spec, data)
 
@@ -245,15 +241,11 @@ def evaluate(weights, robot_graph, spawn_pos, penalty):
     # Return fitness computed from the tracker's recorded xpos
     return fitness_function(tracker.history["xpos"][0], penalty)
 
-
 def experiment(robot_graph: Any, penalty) -> np.ndarray:
     mj.set_mjcb_control(None)
-
-    # Construct robot and spawn it into a temporary world so we can compile the correct model
     robot = construct_mjspec_from_graph(robot_graph)
     world = OlympicArena()
-    # spawn at one of your training starts so the compiled model includes the robot's DOFs
-    world.spawn(robot.spec, spawn_position=[-0.8, 0.0, 0.1])
+    world.spawn(robot.spec, spawn_position=SPAWN_POS[0])
 
     # Compile model that actually contains the robot to get correct qpos/qvel sizes
     model_tmp = world.spec.compile()
@@ -261,22 +253,17 @@ def experiment(robot_graph: Any, penalty) -> np.ndarray:
     mj.mj_resetData(model_tmp, data_tmp)
     mj.mj_forward(model_tmp, data_tmp)
 
-    # input size must match what evaluate() will later compute
     input_size = len(data_tmp.qpos) + len(data_tmp.qvel) + 2
-    hidden_size = 8
-    output_size = model_tmp.nu
-    dummy_net = NeuralController(input_size, hidden_size, output_size)
+    dummy_net = NeuralController(input_size, 8, model_tmp.nu)
     num_params = dummy_net.num_params
 
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
-    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=1000)
+    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=600)
 
     spawn_positions = SPAWN_POS
     def objective(x):
-        # convert candidate to numpy array (nevergrad may pass wrapper objects)
         weights = np.asarray(x)
-
         scores = []
         for sp in spawn_positions:
             try:
@@ -330,7 +317,7 @@ def main() -> None:
     best_weights = experiment(robot_graph, penalty)
 
     world = OlympicArena()
-    world.spawn(core.spec, spawn_position=SPAWN_POS[1])
+    world.spawn(core.spec, spawn_position=SPAWN_POS[0])
     model = world.spec.compile()
     data = mj.MjData(model)
     mj.mj_resetData(model, data)
