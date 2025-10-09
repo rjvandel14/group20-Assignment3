@@ -28,6 +28,7 @@ def evolve_mu_plus_lambda(
     genotype_size: int,
     callbacks: Callbacks,
     cfg: ESConfig = ESConfig(),
+    initial_parents=None
 ) -> Tuple[DiGraph, np.ndarray, float]:
     rng = np.random.default_rng(cfg.seed)
     dim = 3 * genotype_size
@@ -61,17 +62,31 @@ def evolve_mu_plus_lambda(
             print(f"[ES] CMA done in {time.time()-t0:.2f}s | fitness={f:.4f}")
         return f, g, w
 
-    # Initialize μ parents
     if cfg.verbose:
         print(f"[ES] init μ={cfg.mu}, λ={cfg.lam}, gens={cfg.gens}, dim={dim}")
+
     parents = []
-    for i in range(cfg.mu):
-        x = rng.random(dim)
+
+    def eval_and_push(x, note=""):
         sigma = np.full(dim, cfg.sigma_init)
         f, g, w = evaluate_body(x)
         parents.append([x, sigma, f, g, w])
         if cfg.verbose:
-            print(f"[ES] init parent {i+1}/{cfg.mu} | f={f:.4f}")
+            tag = f" ({note})" if note else ""
+            print(f"[ES] init parent {len(parents)}/{cfg.mu}{tag} | f={f:.4f}")
+
+    # (A) use provided seeds first (if any)
+    if initial_parents:
+        for vec in initial_parents[:cfg.mu]:
+            vec = np.asarray(vec, dtype=float)
+            vec = np.clip(vec, 0, 1)
+            eval_and_push(vec, note="seed")
+
+    # (B) fill the rest with randoms
+    while len(parents) < cfg.mu:
+        x = rng.random(dim)
+        eval_and_push(x, note="rand")
+
     best = min(parents, key=lambda ind: ind[2])
 
     # Main ES loop
