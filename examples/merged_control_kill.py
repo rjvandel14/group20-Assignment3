@@ -53,7 +53,11 @@ SCRIPT_NAME = __file__.split("/")[-1][:-3]
 CWD = Path.cwd()
 DATA = CWD / "__data__" / SCRIPT_NAME
 DATA.mkdir(exist_ok=True)
-SPAWN_POS = [-0.8, 0.0, 0.1]
+SPAWN_POS = [
+    [-0.8, 0.0, 0.1],
+    [1.0, 0.0, 0.2],
+    [3.0, 0.0, 0.2],
+]
 NUM_OF_MODULES = 30
 TARGET_POSITION = [5, 0, 0.5]
 
@@ -74,12 +78,6 @@ def make_decode_from_vec(num_modules: int, genotype_size: int):
         return hpd.probability_matrices_to_graph(p_mats[0], p_mats[1], p_mats[2])
     return decode_from_vec
 
-def cma_train_controller(graph):
-    print("[CMA] starting...")
-    w = experiment(graph)
-    f = evaluate(w, graph)
-    print(f"[CMA] best fitness={f:.4f}")
-    return w, float(f)
 
 def count_from_graph(graph: Graph, name) -> int:
     count = 0
@@ -95,23 +93,29 @@ def count_from_graph(graph: Graph, name) -> int:
                 count += 1
     return count
 
-def fitness_function(history: list[float], graph: Graph) -> float:
+def cma_train_controller(graph):
+    print("[CMA] starting...")
+    num_blocks = count_from_graph(graph, "BRICK")
+    num_hinges = count_from_graph(graph, "HINGE")
+    
+    penalty = 0
+    ratio = num_blocks/(num_hinges)
+    if ratio > 1:
+        penalty = 0.3
+
+    w, f = experiment(graph,penalty)
+    #f = evaluate(w, graph)
+    print(f"[CMA] best fitness={f:.4f}")
+    return w, float(f)
+
+def fitness_function(history: list[float], penalty) -> float:
     xt, yt, zt = TARGET_POSITION
     xc, yc, zc = history[-1]
 
     cartesian_distance = np.sqrt(
         (xt - xc) ** 2 + (yt - yc) ** 2 + (zt - zc) ** 2,
     )
-
-    num_blocks = count_from_graph(graph, "BRICK")
-    num_hinges = count_from_graph(graph, "HINGE")
-
-    arch_penalty = 0
-    ratio = num_blocks/(num_hinges)
-    if ratio > 1:
-        arch_penalty = 0.3
-
-    return cartesian_distance + arch_penalty * ratio
+    return cartesian_distance+penalty
 
 # def fitness(history: list[float], joint_history):
 #     final_pos = history[-1]
@@ -159,7 +163,7 @@ def show_xpos_history(history: list[float]) -> None:
     # Calculate initial position
     x0, y0 = int(h * 0.483), int(w * 0.815)
     xc, yc = int(h * 0.483), int(w * 0.9205)
-    ym0, ymc = 0, SPAWN_POS[0]
+    ym0, ymc = 0, SPAWN_POS[0][0]
 
     # Convert position data to pixel coordinates
     pixel_to_dist = -((ymc - ym0) / (yc - y0))
@@ -239,17 +243,16 @@ class StepwiseController:
             target_angles = output * (np.pi / 2)
             data.ctrl[:] = (1 - self.alpha) * data.ctrl[:] + self.alpha * target_angles
 
-def evaluate(weights, robot_graph):
+def evaluate(weights, robot_graph, spawn_pos, penalty):
     world = OlympicArena()
     mj.set_mjcb_control(None)
     robot = construct_mjspec_from_graph(robot_graph)
-    # robot = gecko()
-    world.spawn(robot.spec, spawn_position=SPAWN_POS)
+    world.spawn(robot.spec, spawn_position=spawn_pos)
 
     model = world.spec.compile()
     data = mj.MjData(model)
-    data.qpos[:] = 0.0
-    data.qvel[:] = 0.0
+    mj.mj_resetData(model, data)
+    mj.mj_forward(model, data)
 
     tracker = Tracker(mujoco_obj_to_find=mj.mjtObj.mjOBJ_GEOM, name_to_bind="core")
     tracker.setup(world.spec, data)
@@ -259,15 +262,14 @@ def evaluate(weights, robot_graph):
 
     controller = StepwiseController(neural_net, tracker, ctrl_every=5, save_every=100, alpha=0.8)
 
-    steps = 800 #2500
-    #joint_history = []
+    steps = 800
 
     # --- EARLY BAIL SETTINGS ---
     dt = model.opt.timestep
-    BAIL_SECONDS = 1.5                      # evaluate “promise” in first ~1.5s
+    BAIL_SECONDS = 1.5
     BAIL_STEPS = max(1, int(BAIL_SECONDS / dt))
-    CHECK_EVERY = max(1, int(0.25 / dt))    # check each 0.25s
-    MIN_DX_BAIL = 0.005                     # < 5 mm displacement → bail
+    CHECK_EVERY = max(1, int(0.25 / dt))
+    MIN_DX_BAIL = 0.005
     # ----------------------------
 
     # for bail metrics
@@ -282,28 +284,31 @@ def evaluate(weights, robot_graph):
         controller.step(model, data)
         mj.mj_step(model, data)
 
-        # ---- Early-bail check (only in the first BAIL_SECONDS) ----
+# ---- Early-bail check (only in the first BAIL_SECONDS) ----
         if start_xy is not None and k <= BAIL_STEPS and (k % CHECK_EVERY == 0):
             cur_xy = np.array(core_bind.xpos[:2], dtype=float)
             dx = float(np.linalg.norm(cur_xy - start_xy))
             if dx < MIN_DX_BAIL and k >= BAIL_STEPS:
-                # hopeless controller/body combo → kill fast
+               # hopeless controller/body combo → kill fast
                 print(f"[EVAL] early bail at t≈{k*dt:.2f}s (dx={dx:.4f} m < {MIN_DX_BAIL} m)")
                 return 1e9
-        # -----------------------------------------------------------
 
-    return fitness_function(tracker.history["xpos"][0], robot_graph)
+    # compute fitness using tracker history and graph-based penalty
+    f = fitness_function(tracker.history["xpos"][0], penalty)
+    # add provided penalty (if any) — keep backwards-compatible
+    return f
 
-def experiment(robot_graph: Any) -> np.ndarray:
+def experiment(robot_graph: Any, penalty) -> np.ndarray:
     mj.set_mjcb_control(None)
     robot = construct_mjspec_from_graph(robot_graph)
     # robot = gecko()
     world = OlympicArena()
-    world.spawn(robot.spec, spawn_position=SPAWN_POS)
+    world.spawn(robot.spec, spawn_position=SPAWN_POS[0])
 
     model = world.spec.compile()
     data = mj.MjData(model)
     mj.mj_resetData(model, data)
+    mj.mj_forward(model, data)
 
     input_size = len(data.qpos) + len(data.qvel) + 2
     dummy_net = NeuralController(input_size, 8, model.nu)
@@ -312,14 +317,36 @@ def experiment(robot_graph: Any) -> np.ndarray:
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
     optimizer = ng.optimizers.CMA(parametrization=num_params, budget=50)# 200)
+    
+    spawn_positions = SPAWN_POS
+
+    best_score_so_far = float("inf")
+    weights_path = DATA / "best_weights.csv"
 
     def objective(x):
-        # minimize distance+penalty (your fitness_function returns lower=better)
-        return evaluate(x, robot_graph)
+        nonlocal best_score_so_far
+        weights = np.asarray(x)
+        scores = []
+        for sp in spawn_positions:
+            try:
+                f = evaluate(weights, robot_graph, sp, penalty)
+            except Exception as e:
+                print("Evaluation error at spawn", sp, ":", e)
+                f = 1e6
+            scores.append(f)
+        score = float(np.mean(scores))
+
+        # If this candidate is better, save weights and print
+        if score < best_score_so_far:
+            best_score_so_far = score
+            np.savetxt(weights_path, weights, delimiter=",")
+            print(f"New best score: {score:.4f} – weights saved to {weights_path}")
+
+        return score
 
     recommendation = optimizer.minimize(objective)
     print("Best fitness:", objective(recommendation.value))
-    return recommendation.value
+    return recommendation.value, objective(recommendation.value)
 
 # non-learner test: test if robot can move and otherwise kill-off robot
 def random_move(model: mj.MjModel, data: mj.MjData) -> npt.NDArray[np.float64]:
@@ -343,7 +370,7 @@ def is_learning(robot_graph) -> tuple[bool, float, float]:
         print(f"[non-learner] invalid graph during construct: {type(e).__name__}: {e}")
         return (False, 0.0, 0.0)
 
-    world.spawn(robot.spec, spawn_position=SPAWN_POS)
+    world.spawn(robot.spec, spawn_position=SPAWN_POS[0])
     model = world.spec.compile()
     data = mj.MjData(model)
     mj.mj_resetData(model, data)
@@ -461,7 +488,7 @@ def main() -> None:
     mj.set_mjcb_control(None)
 
     world = OlympicArena()
-    world.spawn(core.spec, spawn_position=SPAWN_POS)
+    world.spawn(core.spec, spawn_position=SPAWN_POS[0])
     model = world.spec.compile()
     data = mj.MjData(model)
     mj.mj_resetData(model, data)
