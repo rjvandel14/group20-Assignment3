@@ -170,30 +170,16 @@ class StepwiseController:
             target_angles = output * (np.pi / 2)
             data.ctrl[:] = (1 - self.alpha) * data.ctrl[:] + self.alpha * target_angles
 
-def count_from_graph(graph: Graph, name) -> int:
-    count = 0
-    if name == "BRICK":
-        for node in graph.nodes:
-            module_type = graph.nodes[node]["type"]
-            if module_type in ModuleType.BRICK.name:
-                count += 1
-    elif name == "HINGE":
-        for node in graph.nodes:
-            module_type = graph.nodes[node]["type"]
-            if module_type in ModuleType.HINGE.name:
-                count += 1
-    return count
-
-def fitness_function(history: list[float], penalty) -> float:
+def fitness_function(history: list[float]) -> float:
     xt, yt, zt = TARGET_POSITION
     xc, yc, zc = history[-1]
 
     cartesian_distance = np.sqrt(
         (xt - xc) ** 2 + (yt - yc) ** 2 + (zt - zc) ** 2,
     )
-    return cartesian_distance#+penalty
+    return cartesian_distance
 
-def evaluate(weights, robot_graph, spawn_pos, penalty):
+def evaluate(weights, robot_graph, spawn_pos):
     world = OlympicArena()
     mj.set_mjcb_control(None)
     robot = construct_mjspec_from_graph(robot_graph)
@@ -222,9 +208,9 @@ def evaluate(weights, robot_graph, spawn_pos, penalty):
         joint_history.append(data.ctrl.copy())
 
     # Return fitness computed from the tracker's recorded xpos
-    return fitness_function(tracker.history["xpos"][0], penalty)
+    return fitness_function(tracker.history["xpos"][0])
 
-def experiment(robot_graph: Graph, penalty, weights) -> np.ndarray:
+def experiment(robot_graph: Graph, weights) -> np.ndarray:
     mj.set_mjcb_control(None)
 
     # Construct robot and spawn it into a temporary world so we can compile the correct model
@@ -258,7 +244,7 @@ def experiment(robot_graph: Graph, penalty, weights) -> np.ndarray:
         scores = []
         for sp in spawn_positions:
             try:
-                f = evaluate(weights, robot_graph, sp, penalty)
+                f = evaluate(weights, robot_graph, sp)
             except Exception as e:
                 print("Evaluation error at spawn", sp, ":", e)
                 f = 1e6
@@ -287,17 +273,9 @@ def main() -> None:
 
     robot_graph = json_graph.node_link_graph(graph_json, edges="edges")
     robot = construct_mjspec_from_graph(robot_graph)
-
-    num_blocks = count_from_graph(robot_graph, "BRICK")
-    num_hinges = count_from_graph(robot_graph, "HINGE")
-    
-    penalty = 0
-    ratio = num_blocks/(num_hinges)
-    if ratio > 1:
-        penalty = 0.3
         
     mj.set_mjcb_control(None)
-    best_weights = experiment(robot_graph, penalty, weights)
+    best_weights = experiment(robot_graph, weights)
 
     world = OlympicArena()
     world.spawn(robot.spec, spawn_position=SPAWN_POS[0])  
