@@ -12,8 +12,6 @@ import numpy.typing as npt
 from mujoco import viewer
 import random
 import nevergrad as ng
-
-import time
 from networkx import Graph
 
 # Local libraries
@@ -35,8 +33,6 @@ from ariel.body_phenotypes.robogen_lite.modules.brick import BrickModule
 from ariel.simulation.environments import OlympicArena
 from ariel.utils.tracker import Tracker
 
-from body_opt import optimize_body_de, build_robot
-
 # Type Checking
 if TYPE_CHECKING:
     from networkx import DiGraph
@@ -55,7 +51,12 @@ SCRIPT_NAME = __file__.split("/")[-1][:-3]
 CWD = Path.cwd()
 DATA = CWD / "__data__" / SCRIPT_NAME
 DATA.mkdir(exist_ok=True)
-SPAWN_POS = [-0.8, 0.0, 0.1]
+SPAWN_POS = [
+        [-1, 0.0, 0.2],
+        [1.0, 0.0, 0.2],
+        [3, 0.0, 0.2],
+    ]
+
 NUM_OF_MODULES = 30
 TARGET_POSITION = [5, 0, 0.5]
 
@@ -73,25 +74,16 @@ def count_from_graph(graph: Graph, name) -> int:
                 count += 1
     return count
 
-def fitness_function(history: list[float], graph: Graph) -> float:
+def fitness_function(history: list[float], penalty) -> float:
     xt, yt, zt = TARGET_POSITION
     xc, yc, zc = history[-1]
 
     cartesian_distance = np.sqrt(
         (xt - xc) ** 2 + (yt - yc) ** 2 + (zt - zc) ** 2,
     )
+    return cartesian_distance+penalty
 
-    num_blocks = count_from_graph(graph, "BRICK")
-    num_hinges = count_from_graph(graph, "HINGE")
-
-    arch_penalty = 0
-    ratio = num_blocks/(num_hinges)
-    if ratio > 1:
-        arch_penalty = 0.3
-
-    return cartesian_distance+arch_penalty*ratio
-
-def fitness(history: list[float], joint_history):
+def fitness(history: list[float], joint_history, ):
     final_pos = history[-1]
     displacement_y = abs(final_pos[1])  
     displacement_x = final_pos[0] 
@@ -140,7 +132,7 @@ def show_xpos_history(history: list[float]) -> None:
     # Calculate initial position
     x0, y0 = int(h * 0.483), int(w * 0.815)
     xc, yc = int(h * 0.483), int(w * 0.9205)
-    ym0, ymc = 0, SPAWN_POS[0]
+    ym0, ymc = 0, SPAWN_POS[1][0]
 
     # Convert position data to pixel coordinates
     pixel_to_dist = -((ymc - ym0) / (yc - y0))
@@ -170,22 +162,6 @@ def show_xpos_history(history: list[float]) -> None:
     # Show results
     plt.show()
 
-def random_move(
-    model: mj.MjModel,
-    data: mj.MjData,
-) -> npt.NDArray[np.float64]:
-    # Get the number of joints
-    num_joints = model.nu
-
-    # Hinges take values between -pi/2 and pi/2
-    hinge_range = np.pi / 2
-    return RNG.uniform(
-        low=-hinge_range,  # -pi/2
-        high=hinge_range,  # pi/2
-        size=num_joints,
-    ).astype(np.float64)
-
-
 class NeuralController:
     def __init__(self, input_size, hidden_size, output_size, weights=None):
         self.input_size = input_size
@@ -209,10 +185,8 @@ class NeuralController:
 
         return outputs.reshape(self.output_size)
 
-
-# --- Stepwise Controller --- #
 class StepwiseController:
-    def __init__(self, neural_net, tracker, ctrl_every=50, save_every=100, alpha=0.1):
+    def __init__(self, neural_net, tracker, ctrl_every=5, save_every=100, alpha=0.1):
         self.neural_net = neural_net
         self.tracker = tracker
         self.ctrl_every = ctrl_every
@@ -237,18 +211,16 @@ class StepwiseController:
             target_angles = output * (np.pi / 2)
             data.ctrl[:] = (1 - self.alpha) * data.ctrl[:] + self.alpha * target_angles
 
-
-def evaluate(weights, robot_graph):
+def evaluate(weights, robot_graph, spawn_pos, penalty):
     world = OlympicArena()
     mj.set_mjcb_control(None)
     robot = construct_mjspec_from_graph(robot_graph)
-    #robot = gecko()
-    world.spawn(robot.spec, spawn_position=[-0.8, 0.0, 0.1])
+    world.spawn(robot.spec, spawn_position=spawn_pos)
 
     model = world.spec.compile()
     data = mj.MjData(model)
-    data.qpos[:] = 0.0
-    data.qvel[:] = 0.0
+    mj.mj_resetData(model, data)
+    mj.mj_forward(model, data)
 
     tracker = Tracker(mujoco_obj_to_find=mj.mjtObj.mjOBJ_GEOM, name_to_bind="core")
     tracker.setup(world.spec, data)
@@ -256,9 +228,9 @@ def evaluate(weights, robot_graph):
     input_size = len(data.qpos) + len(data.qvel) + 2
     neural_net = NeuralController(input_size, 8, model.nu, weights)
 
-    controller = StepwiseController(neural_net, tracker, ctrl_every=5, save_every=100, alpha=0.8)
+    controller = StepwiseController(neural_net, tracker, ctrl_every=5, save_every=100, alpha=0.1)
 
-    steps = 2500
+    steps = 1500
     joint_history = []
 
     for _ in range(steps):
@@ -266,48 +238,57 @@ def evaluate(weights, robot_graph):
         mj.mj_step(model, data)
         joint_history.append(data.ctrl.copy())
 
-    joint_history = np.array(joint_history)
-    return fitness(to_track, joint_history)
+    # Return fitness computed from the tracker's recorded xpos
+    return fitness_function(tracker.history["xpos"][0], penalty)
 
-def fitness(to_track, joint_history):
-    final_pos = to_track[0].xpos.copy()
-    displacement_y = abs(final_pos[1])  
-    displacement_x = final_pos[0] 
-
-    oscillation_reward = np.mean(np.std(joint_history, axis=0)) # variation of the joint angles
-
-    saturation_penalty = np.mean(np.abs(np.abs(joint_history) - (np.pi / 2))) # to avoid getting stuck on max or min joint angles
-
-    fitness = displacement_x + 0.08 * oscillation_reward - 0.08 * saturation_penalty - 0.3*displacement_y
-
-    return fitness
-
-
-def experiment(robot_graph: Any) -> np.ndarray:
+def experiment(robot_graph: Any, penalty) -> np.ndarray:
     mj.set_mjcb_control(None)
     robot = construct_mjspec_from_graph(robot_graph)
-    #robot = gecko()
     world = OlympicArena()
-    world.spawn(robot.spec, spawn_position=[-0.8, 0.0, 0.1])
+    world.spawn(robot.spec, spawn_position=SPAWN_POS[0])
 
-    model = world.spec.compile()
-    data = mj.MjData(model)
-    mj.mj_resetData(model, data)
+    model_tmp = world.spec.compile()
+    data_tmp = mj.MjData(model_tmp)
+    mj.mj_resetData(model_tmp, data_tmp)
+    mj.mj_forward(model_tmp, data_tmp)
 
-    input_size = len(data.qpos) + len(data.qvel) + 2
-    dummy_net = NeuralController(input_size, 8, model.nu)
+    input_size = len(data_tmp.qpos) + len(data_tmp.qvel) + 2
+    dummy_net = NeuralController(input_size, 8, model_tmp.nu)
     num_params = dummy_net.num_params
 
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
-    optimizer = ng.optimizers.CMA(parametrization=parametrization, budget=200)
+    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=600)
 
+    spawn_positions = SPAWN_POS
+
+    # Track the best value found so far
+    best_score_so_far = float("inf")
+    weights_path = DATA / "best_weights.csv"
 
     def objective(x):
-        return evaluate(x, robot_graph)
+        nonlocal best_score_so_far
+        weights = np.asarray(x)
+        scores = []
+        for sp in spawn_positions:
+            try:
+                f = evaluate(weights, robot_graph, sp, penalty)
+            except Exception as e:
+                print("Evaluation error at spawn", sp, ":", e)
+                f = 1e6
+            scores.append(f)
+        score = float(np.mean(scores))
+
+        # If this candidate is better, save weights and print
+        if score < best_score_so_far:
+            best_score_so_far = score
+            np.savetxt(weights_path, weights, delimiter=",")
+            print(f"New best score: {score:.4f} – weights saved to {weights_path}")
+
+        return score
 
     recommendation = optimizer.minimize(objective)
-    print("Best fitness:", objective(recommendation.value))
+    print("Best aggregated fitness after full evolution:", objective(recommendation.value))
     return recommendation.value
 
 
@@ -333,15 +314,22 @@ def main() -> None:
         p_matrices[1],
         p_matrices[2],
     )
+    num_blocks = count_from_graph(robot_graph, "BRICK")
+    num_hinges = count_from_graph(robot_graph, "HINGE")
+    
+    penalty = 0
+    ratio = num_blocks/(num_hinges)
+    if ratio > 1:
+        penalty = 0.3
+
     save_graph_as_json(robot_graph, DATA / "robot_graph.json")
     core = construct_mjspec_from_graph(robot_graph)
-    #core = gecko()
 
     mj.set_mjcb_control(None)
-    best_weights = experiment(robot_graph)
+    best_weights = experiment(robot_graph, penalty)
 
     world = OlympicArena()
-    world.spawn(core.spec, spawn_position=[-0.8, 0.0, 0.1])
+    world.spawn(core.spec, spawn_position=SPAWN_POS[0])
     model = world.spec.compile()
     data = mj.MjData(model)
     mj.mj_resetData(model, data)
@@ -362,5 +350,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    run_body_search_then_view()
-    #main()
+    main()
