@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 type ViewerTypes = Literal["launcher", "video", "simple", "no_control", "frame"]
 
 # --- RANDOM GENERATOR SETUP --- #
-SEED = 42
+SEED = 111
 RNG = np.random.default_rng(SEED)
 np.random.seed(SEED)
 random.seed(SEED)
@@ -92,30 +92,90 @@ def count_from_graph(graph: Graph, name) -> int:
             if module_type in ModuleType.HINGE.name:
                 count += 1
     return count
+def symmetry_score(graph) -> float:
+    """Return [0,1]; 1 = perfectly mirrored around x=0."""
+    try:
+        core = construct_mjspec_from_graph(graph)
+    except Exception:
+        return 0.0
+
+    coords = []
+    for body in core.spec.bodies:
+        if hasattr(body, "pos") and body.pos is not None:
+            coords.append(np.asarray(body.pos, float))
+        for geom in getattr(body, "geoms", []):
+            if hasattr(geom, "pos") and geom.pos is not None:
+                coords.append(np.asarray(geom.pos, float))
+    if not coords:
+        return 0.0
+
+    coords = np.vstack(coords)
+    mirrored = coords.copy()
+    mirrored[:, 0] *= -1
+
+    dists = []
+    for m in mirrored:
+        d = np.sqrt(((coords - m) ** 2).sum(axis=1)).min()
+        dists.append(d)
+    mean_min = float(np.mean(dists))
+
+    scale = np.linalg.norm(coords.max(axis=0) - coords.min(axis=0))
+    if scale <= 1e-9:
+        return 0.0
+
+    return float(np.clip(1.0 - mean_min / scale, 0.0, 1.0))
+
+def stability_penalty(graph, z_min=0.15, weight=3.0) -> float:
+    """Penalty grows if average body height < z_min."""
+    core = construct_mjspec_from_graph(graph)
+    z_positions = [np.asarray(b.pos, float)[2]
+                   for b in core.spec.bodies if hasattr(b, "pos")]
+    if not z_positions:
+        return 0.0
+    return max(0.0, z_min - float(np.mean(z_positions))) * weight
+
+def single_connection_hinge_penalty(g, w_single: float = 0.10) -> float:
+    deg = g.degree
+    bad = sum(1 for n, d in g.nodes(data=True)
+              if d.get("type") == "HINGE" and deg(n) == 1)
+    return w_single * bad
+
+def arch_penalty(graph, base=0.30) -> float:
+    num_blocks = count_from_graph(graph, "BRICK")
+    num_hinges = count_from_graph(graph, "HINGE")
+    if num_hinges == 0:
+        return 1e6
+    ratio_over = max(0.0, num_blocks/num_hinges - 1.0)
+    return base * ratio_over
 
 def cma_train_controller(graph):
     print("[CMA] starting...")
-    num_blocks = count_from_graph(graph, "BRICK")
-    num_hinges = count_from_graph(graph, "HINGE")
-    
-    penalty = 0
-    ratio = num_blocks/(num_hinges)
-    if ratio > 1:
-        penalty = 0.3
+
+    sym_bonus = 0.5 * symmetry_score(graph)            # subtract later (good thing)
+    pen_arch  = arch_penalty(graph, base=0.30)         # add
+    pen_hinge = single_connection_hinge_penalty(graph, w_single=0.10)  # add
+    pen_stab  = stability_penalty(graph, z_min=0.15, weight=0.6)       # add (tuned lower)
+
+    penalty = (pen_arch + pen_hinge + pen_stab) - sym_bonus
 
     w, f = experiment(graph,penalty)
     #f = evaluate(w, graph)
     print(f"[CMA] best fitness={f:.4f}")
     return w, float(f)
 
-def fitness_function(history: list[float], penalty) -> float:
+def fitness_function(history: list[float], graph : Graph, penalty) -> float:
+    if not history:
+        return 1e6  
+    
     xt, yt, zt = TARGET_POSITION
     xc, yc, zc = history[-1]
 
     cartesian_distance = np.sqrt(
         (xt - xc) ** 2 + (yt - yc) ** 2 + (zt - zc) ** 2,
     )
+
     return cartesian_distance+penalty
+
 
 # def fitness(history: list[float], joint_history):
 #     final_pos = history[-1]
@@ -262,7 +322,8 @@ def evaluate(weights, robot_graph, spawn_pos, penalty):
 
     controller = StepwiseController(neural_net, tracker, ctrl_every=5, save_every=100, alpha=0.8)
 
-    steps = 800
+    steps = 800 #2500
+    #joint_history = []
 
     # --- EARLY BAIL SETTINGS ---
     dt = model.opt.timestep
@@ -294,7 +355,7 @@ def evaluate(weights, robot_graph, spawn_pos, penalty):
                 return 1e9
 
     # compute fitness using tracker history and graph-based penalty
-    f = fitness_function(tracker.history["xpos"][0], penalty)
+    f = fitness_function(tracker.history["xpos"][0], robot_graph, penalty)
     # add provided penalty (if any) — keep backwards-compatible
     return f
 
@@ -316,7 +377,7 @@ def experiment(robot_graph: Any, penalty) -> np.ndarray:
 
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
-    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=50)# 200)
+    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=15)# 200)
     
     spawn_positions = SPAWN_POS
 
@@ -475,11 +536,14 @@ def main() -> None:
     best_graph, best_weights, best_fit = evolve_mu_plus_lambda(
         genotype_size=genotype_size,
         callbacks=callbacks,
-        cfg=ESConfig(gens=4, mu=4, lam=8, sigma_init=0.15, prescreen_retries=3, seed=SEED),
+        cfg=ESConfig(gens=12, mu=12, lam=48, sigma_init=0.20, prescreen_retries=3, seed=SEED),
         initial_parents=[smoke_vec],
     )
     print(f"[FINAL] best fitness: {best_fit:.4f}")
 
+    print("\nNode attributes of best_graph:")
+    for node, attrs in best_graph.nodes(data=True):
+        print(node, attrs)
     # 3) Save + visualize winner (unchanged)
     save_graph_as_json(best_graph, DATA / "robot_graph.json")
     core = construct_mjspec_from_graph(best_graph)
