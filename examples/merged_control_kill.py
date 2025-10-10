@@ -311,7 +311,7 @@ def experiment(robot_graph: Any) -> np.ndarray:
 
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
-    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=50)# 200)
+    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=20)# 200)
 
     def objective(x):
         # minimize distance+penalty (your fitness_function returns lower=better)
@@ -448,7 +448,7 @@ def main() -> None:
     best_graph, best_weights, best_fit = evolve_mu_plus_lambda(
         genotype_size=genotype_size,
         callbacks=callbacks,
-        cfg=ESConfig(gens=4, mu=8, lam=24, sigma_init=0.15, prescreen_retries=3, seed=SEED),
+        cfg=ESConfig(gens=2, mu=8, lam=24, sigma_init=0.15, prescreen_retries=3, seed=SEED),
         initial_parents=[smoke_vec],
     )
     print(f"[FINAL] best fitness: {best_fit:.4f}")
