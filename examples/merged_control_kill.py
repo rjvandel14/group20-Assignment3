@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 type ViewerTypes = Literal["launcher", "video", "simple", "no_control", "frame"]
 
 # --- RANDOM GENERATOR SETUP --- #
-SEED = 111
+SEED = 333
 RNG = np.random.default_rng(SEED)
 np.random.seed(SEED)
 random.seed(SEED)
@@ -151,10 +151,10 @@ def arch_penalty(graph, base=0.30) -> float:
 def cma_train_controller(graph):
     print("[CMA] starting...")
 
-    sym_bonus = 0.5 * symmetry_score(graph)            # subtract later (good thing)
-    pen_arch  = arch_penalty(graph, base=0.30)         # add
+    sym_bonus = 0.3 * symmetry_score(graph)            # subtract later (good thing)
+    pen_arch  = arch_penalty(graph, base=0.20)         # add
     pen_hinge = single_connection_hinge_penalty(graph, w_single=0.10)  # add
-    pen_stab  = stability_penalty(graph, z_min=0.15, weight=0.6)       # add (tuned lower)
+    pen_stab  = stability_penalty(graph, z_min=0.15, weight=0.2)       # add (tuned lower)
 
     penalty = (pen_arch + pen_hinge + pen_stab) - sym_bonus
 
@@ -320,9 +320,9 @@ def evaluate(weights, robot_graph, spawn_pos, penalty):
     input_size = len(data.qpos) + len(data.qvel) + 2
     neural_net = NeuralController(input_size, 8, model.nu, weights)
 
-    controller = StepwiseController(neural_net, tracker, ctrl_every=5, save_every=100, alpha=0.8)
+    controller = StepwiseController(neural_net, tracker, ctrl_every=5, save_every=100, alpha=0.1)
 
-    steps = 800 #2500
+    steps = 1000 #2500
     #joint_history = []
 
     # --- EARLY BAIL SETTINGS ---
@@ -377,7 +377,7 @@ def experiment(robot_graph: Any, penalty) -> np.ndarray:
 
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
-    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=15)# 200)
+    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=250)# 200)
     
     spawn_positions = SPAWN_POS
 
@@ -536,7 +536,7 @@ def main() -> None:
     best_graph, best_weights, best_fit = evolve_mu_plus_lambda(
         genotype_size=genotype_size,
         callbacks=callbacks,
-        cfg=ESConfig(gens=12, mu=12, lam=48, sigma_init=0.20, prescreen_retries=3, seed=SEED),
+        cfg=ESConfig(gens=20, mu=25, lam=48, sigma_init=0.12, prescreen_retries=3, seed=SEED),
         initial_parents=[smoke_vec],
     )
     print(f"[FINAL] best fitness: {best_fit:.4f}")
