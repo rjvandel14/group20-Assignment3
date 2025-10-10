@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 type ViewerTypes = Literal["launcher", "video", "simple", "no_control", "frame"]
 
 # --- RANDOM GENERATOR SETUP --- #
-SEED = 42
+SEED = 111
 RNG = np.random.default_rng(SEED)
 np.random.seed(SEED)
 random.seed(SEED)
@@ -322,7 +322,7 @@ def evaluate(weights, robot_graph, spawn_pos, penalty):
 
     controller = StepwiseController(neural_net, tracker, ctrl_every=5, save_every=100, alpha=0.8)
 
-    steps = 1000 #2500
+    steps = 800 #2500
     #joint_history = []
 
     # --- EARLY BAIL SETTINGS ---
@@ -377,7 +377,7 @@ def experiment(robot_graph: Any, penalty) -> np.ndarray:
 
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
-    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=50)# 200)
+    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=15)# 200)
     
     spawn_positions = SPAWN_POS
 
@@ -537,7 +537,7 @@ def main() -> None:
     best_graph, best_weights, best_fit = evolve_mu_plus_lambda(
         genotype_size=genotype_size,
         callbacks=callbacks,
-        cfg=ESConfig(gens=2, mu=8, lam=24, sigma_init=0.15, prescreen_retries=3, seed=SEED),
+        cfg=ESConfig(gens=12, mu=12, lam=48, sigma_init=0.20, prescreen_retries=3, seed=SEED),
         initial_parents=[smoke_vec],
     )
     print(f"[FINAL] best fitness: {best_fit:.4f}")
