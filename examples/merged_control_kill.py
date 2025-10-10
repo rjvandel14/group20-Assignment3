@@ -359,7 +359,7 @@ def random_move(model: mj.MjModel, data: mj.MjData) -> npt.NDArray[np.float64]:
     ).astype(np.float64)
 
 def is_learning(robot_graph) -> tuple[bool, float, float]:
-    """Prescreen: settle, then apply random joint kicks; pass if it touches floor and moves enough."""
+    
     mj.set_mjcb_control(None)
     world = OlympicArena()
 
@@ -418,7 +418,7 @@ def is_learning(robot_graph) -> tuple[bool, float, float]:
     last_1s = max(1, int(1.0 / dt))
     speed_end = float(np.sqrt(np.mean(np.square(v_hist[-last_1s:]))) if v_hist else 0.0)
 
-    # pass rule (your AND rule)
+    # passed when robot had contact with floor and min distance and speed is met
     passed = floor_contact and ((dx >= MIN_DX) or (speed_end >= MIN_V_RMS))
 
     status = "robot passed" if passed else "killed"
