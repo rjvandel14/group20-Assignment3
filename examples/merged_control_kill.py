@@ -63,7 +63,7 @@ TARGET_POSITION = [5, 0, 0.5]
 
 # non-learner test values
 NONLEANER_SECONDS = 4.0   # active phase to see if we should kill
-MAX_BODY_RETRIES = 10    # how many bodies we retry before giving up
+MAX_BODY_RETRIES = 15    # how many bodies we retry before giving up
 SETTLE_SECONDS = 1.5   # let it fall/settle for a second
 KICK_SCALE = 0.7    # strength of joint kicks during test
 
@@ -443,17 +443,17 @@ def is_learning(robot_graph) -> tuple[bool, float, float]:
     if core_bind is None:
         return (False, 0.0, 0.0)
 
-    # thresholds (your fixed ones)
+    # thresholds 
     dt = model.opt.timestep
-    MIN_DX = 0.02    # 7 cm displacement over active phase
-    MIN_V_RMS = 0.01   # 5 cm/s RMS over last 1 s
+    MIN_DX = 0.02    # approx 2–3 cm, robot must move at least a few centimeters
+    MIN_V_RMS = 0.01   # approx 1 cm/s over last 1 s, robot must show some speed
 
     # timing
     dt = model.opt.timestep # get simulation time step
     settle_steps = max(1, int(SETTLE_SECONDS / dt)) # how many steps in the settling phase
     active_steps = max(1, int(NONLEANER_SECONDS / dt)) # how many steps in the active test phase
 
-    # phase 1: settle
+    # phase 1: settle (no control), let it fall and stabilize
     data.ctrl[:] = 0.0
     for _ in range(settle_steps):
         mj.mj_step(model, data)
@@ -466,7 +466,6 @@ def is_learning(robot_graph) -> tuple[bool, float, float]:
 
     # phase 2: active phase - movement test
     # apply random movements in joints to see if robot is capable of moving
-
     for _ in range(active_steps):
         data.ctrl[:] = KICK_SCALE * random_move(model, data) # random control signal to every joint
         mj.mj_step(model, data) # react to applied torques
