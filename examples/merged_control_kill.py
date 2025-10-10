@@ -95,13 +95,59 @@ def count_from_graph(graph: Graph, name) -> int:
                 count += 1
     return count
 
+def symmetry_score(graph) -> float:
+    """[0,1] using placement from the built spec; robust and simple."""
+    try:
+        core = construct_mjspec_from_graph(graph)
+    except Exception:
+        return 0.0
+
+    # Collect approximate local positions from spec bodies/geoms
+    coords = []
+    # The spec uses a MuJoCo-style tree. Bodies have `pos` (local).
+    # We walk bodies and geoms and grab whatever has a `pos` attribute.
+    for body in core.spec.bodies:
+        if hasattr(body, "pos") and body.pos is not None:
+            coords.append(np.asarray(body.pos, float))
+        for geom in getattr(body, "geoms", []):
+            if hasattr(geom, "pos") and geom.pos is not None:
+                coords.append(np.asarray(geom.pos, float))
+
+    if not coords:
+        return 0.0
+
+    coords = np.vstack(coords)
+    # Mirror across sagittal plane (x=0) and compute mean nearest distance
+    mirrored = coords.copy()
+    mirrored[:, 0] *= -1
+
+    # Lightweight nearest-neighbour via brute force (no scipy)
+    dists = []
+    for m in mirrored:
+        d = np.sqrt(((coords - m) ** 2).sum(axis=1)).min()
+        dists.append(d)
+    mean_min = float(np.mean(dists))
+
+    scale = np.linalg.norm(coords.max(axis=0) - coords.min(axis=0))
+    if scale <= 1e-9:
+        return 0.0
+
+    return max(0.0, min(1.0, 1.0 - mean_min / scale))
+
+
 def fitness_function(history: list[float], graph: Graph) -> float:
+    if not history:
+        return 1e6  
+    
     xt, yt, zt = TARGET_POSITION
     xc, yc, zc = history[-1]
 
     cartesian_distance = np.sqrt(
         (xt - xc) ** 2 + (yt - yc) ** 2 + (zt - zc) ** 2,
     )
+
+    sym = symmetry_score(graph)                    # in [0,1]
+    sym_bonus = 0.1 * sym     
 
     num_blocks = count_from_graph(graph, "BRICK")
     num_hinges = count_from_graph(graph, "HINGE")
@@ -111,7 +157,8 @@ def fitness_function(history: list[float], graph: Graph) -> float:
     if ratio > 1:
         arch_penalty = 0.3
 
-    return cartesian_distance + arch_penalty * ratio
+    return cartesian_distance + arch_penalty * ratio - sym_bonus
+
 
 # def fitness(history: list[float], joint_history):
 #     final_pos = history[-1]
@@ -259,7 +306,7 @@ def evaluate(weights, robot_graph):
 
     controller = StepwiseController(neural_net, tracker, ctrl_every=5, save_every=100, alpha=0.8)
 
-    steps = 800 #2500
+    steps = 100 #2500
     #joint_history = []
 
     # --- EARLY BAIL SETTINGS ---
@@ -311,7 +358,7 @@ def experiment(robot_graph: Any) -> np.ndarray:
 
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
-    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=20)# 200)
+    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=10)# 200)
 
     def objective(x):
         # minimize distance+penalty (your fitness_function returns lower=better)
@@ -453,6 +500,9 @@ def main() -> None:
     )
     print(f"[FINAL] best fitness: {best_fit:.4f}")
 
+    print("\nNode attributes of best_graph:")
+    for node, attrs in best_graph.nodes(data=True):
+        print(node, attrs)
     # 3) Save + visualize winner (unchanged)
     save_graph_as_json(best_graph, DATA / "robot_graph.json")
     core = construct_mjspec_from_graph(best_graph)
