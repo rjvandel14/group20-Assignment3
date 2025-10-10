@@ -92,34 +92,27 @@ def count_from_graph(graph: Graph, name) -> int:
             if module_type in ModuleType.HINGE.name:
                 count += 1
     return count
-
 def symmetry_score(graph) -> float:
-    """[0,1] using placement from the built spec; robust and simple."""
+    """Return [0,1]; 1 = perfectly mirrored around x=0."""
     try:
         core = construct_mjspec_from_graph(graph)
     except Exception:
         return 0.0
 
-    # Collect approximate local positions from spec bodies/geoms
     coords = []
-    # The spec uses a MuJoCo-style tree. Bodies have `pos` (local).
-    # We walk bodies and geoms and grab whatever has a `pos` attribute.
     for body in core.spec.bodies:
         if hasattr(body, "pos") and body.pos is not None:
             coords.append(np.asarray(body.pos, float))
         for geom in getattr(body, "geoms", []):
             if hasattr(geom, "pos") and geom.pos is not None:
                 coords.append(np.asarray(geom.pos, float))
-
     if not coords:
         return 0.0
 
     coords = np.vstack(coords)
-    # Mirror across sagittal plane (x=0) and compute mean nearest distance
     mirrored = coords.copy()
     mirrored[:, 0] *= -1
 
-    # Lightweight nearest-neighbour via brute force (no scipy)
     dists = []
     for m in mirrored:
         d = np.sqrt(((coords - m) ** 2).sum(axis=1)).min()
@@ -130,25 +123,47 @@ def symmetry_score(graph) -> float:
     if scale <= 1e-9:
         return 0.0
 
-    return max(0.0, min(1.0, 1.0 - mean_min / scale))
+    return float(np.clip(1.0 - mean_min / scale, 0.0, 1.0))
 
+def stability_penalty(graph, z_min=0.15, weight=3.0) -> float:
+    """Penalty grows if average body height < z_min."""
+    core = construct_mjspec_from_graph(graph)
+    z_positions = [np.asarray(b.pos, float)[2]
+                   for b in core.spec.bodies if hasattr(b, "pos")]
+    if not z_positions:
+        return 0.0
+    return max(0.0, z_min - float(np.mean(z_positions))) * weight
+
+def single_connection_hinge_penalty(g, w_single: float = 0.10) -> float:
+    deg = g.degree
+    bad = sum(1 for n, d in g.nodes(data=True)
+              if d.get("type") == "HINGE" and deg(n) == 1)
+    return w_single * bad
+
+def arch_penalty(graph, base=0.30) -> float:
+    num_blocks = count_from_graph(graph, "BRICK")
+    num_hinges = count_from_graph(graph, "HINGE")
+    if num_hinges == 0:
+        return 1e6
+    ratio_over = max(0.0, num_blocks/num_hinges - 1.0)
+    return base * ratio_over
 
 def cma_train_controller(graph):
     print("[CMA] starting...")
-    num_blocks = count_from_graph(graph, "BRICK")
-    num_hinges = count_from_graph(graph, "HINGE")
-    
-    penalty = 0
-    ratio = num_blocks/(num_hinges)
-    if ratio > 1:
-        penalty = 0.3
+
+    sym_bonus = 0.5 * symmetry_score(graph)            # subtract later (good thing)
+    pen_arch  = arch_penalty(graph, base=0.30)         # add
+    pen_hinge = single_connection_hinge_penalty(graph, w_single=0.10)  # add
+    pen_stab  = stability_penalty(graph, z_min=0.15, weight=0.6)       # add (tuned lower)
+
+    penalty = (pen_arch + pen_hinge + pen_stab) - sym_bonus
 
     w, f = experiment(graph,penalty)
     #f = evaluate(w, graph)
     print(f"[CMA] best fitness={f:.4f}")
     return w, float(f)
 
-def fitness_function(history: list[float], penalty) -> float:
+def fitness_function(history: list[float], graph : Graph, penalty) -> float:
     if not history:
         return 1e6  
     
@@ -159,9 +174,7 @@ def fitness_function(history: list[float], penalty) -> float:
         (xt - xc) ** 2 + (yt - yc) ** 2 + (zt - zc) ** 2,
     )
 
-    sym = symmetry_score(graph)                    # in [0,1]
-    sym_bonus = 0.1 * sym     
-    return cartesian_distance+penalty - sym_bonus
+    return cartesian_distance+penalty
 
 
 # def fitness(history: list[float], joint_history):
@@ -309,7 +322,7 @@ def evaluate(weights, robot_graph, spawn_pos, penalty):
 
     controller = StepwiseController(neural_net, tracker, ctrl_every=5, save_every=100, alpha=0.8)
 
-    steps = 100 #2500
+    steps = 1000 #2500
     #joint_history = []
 
     # --- EARLY BAIL SETTINGS ---
@@ -342,7 +355,7 @@ def evaluate(weights, robot_graph, spawn_pos, penalty):
                 return 1e9
 
     # compute fitness using tracker history and graph-based penalty
-    f = fitness_function(tracker.history["xpos"][0], penalty)
+    f = fitness_function(tracker.history["xpos"][0], robot_graph, penalty)
     # add provided penalty (if any) — keep backwards-compatible
     return f
 
@@ -364,7 +377,7 @@ def experiment(robot_graph: Any, penalty) -> np.ndarray:
 
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
-    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=10)# 200)
+    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=50)# 200)
     
     spawn_positions = SPAWN_POS
 
