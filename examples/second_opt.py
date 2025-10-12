@@ -43,10 +43,10 @@ CWD = Path.cwd()
 DATA = CWD / "__data__" / SCRIPT_NAME
 DATA.mkdir(exist_ok=True)
 SPAWN_POS = [
-        [-1, 0.0, 0.1],
-        [1.0, 0.0, 0.1],
-        [3, 0.0, 0.1],
-    ]
+    [-0.8, 0.0, 0.1],
+    [1.0, 0.0, 0.2],
+    [3.0, 0.0, 0.2],
+]
 TARGET_POSITION = [5, 0, 0.5]
 
 SEED = 42
@@ -119,7 +119,6 @@ def show_xpos_history(history: list[float]) -> None:
 
     # Show results
     plt.show()
-
 class NeuralController:
     def __init__(self, input_size, hidden_size, output_size, weights=None):
         self.input_size = input_size
@@ -199,7 +198,7 @@ def evaluate(weights, robot_graph, spawn_pos):
 
     controller = StepwiseController(neural_net, tracker, ctrl_every=5, save_every=100, alpha=0.1)
 
-    steps = 1500
+    steps = 3000
     joint_history = []
 
     for _ in range(steps):
@@ -234,10 +233,10 @@ def experiment(robot_graph: Graph, weights) -> np.ndarray:
 
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
-    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=200)
+    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=5000)
 
     spawn_positions = SPAWN_POS
-    def objective(x):
+    def objective(x): 
         # convert candidate to numpy array (nevergrad may pass wrapper objects)
         weights = np.asarray(x)
 
@@ -276,6 +275,8 @@ def main() -> None:
         
     mj.set_mjcb_control(None)
     best_weights = experiment(robot_graph, weights)
+    best_weights_path = DATA / "best_weights.csv"
+    np.savetxt(best_weights_path, best_weights, delimiter=",")
 
     world = OlympicArena()
     world.spawn(robot.spec, spawn_position=SPAWN_POS[0])  

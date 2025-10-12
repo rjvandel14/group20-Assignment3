@@ -15,10 +15,8 @@ from mujoco import viewer
 import mujoco as mj
 from ariel.utils.tracker import Tracker
 
-SCRIPT_NAME = __file__.split("/")[-1][:-3]
-CWD = Path.cwd()
-DATA = CWD / "__data__" / SCRIPT_NAME
-DATA.mkdir(exist_ok=True)
+graph_path = Path("./__data__/es_anytime/best_graph.json")
+weights_path = Path("./__data__/second_opt/best_weights.csv")
 SPAWN_POS = [-0.8, 0.0, 0.1]
 
 def show_xpos_history(history: list[float]) -> None:
@@ -136,30 +134,16 @@ class StepwiseController:
             target_angles = output * (np.pi / 2)
             data.ctrl[:] = (1 - self.alpha) * data.ctrl[:] + self.alpha * target_angles
 
-# path to saved snapshot (replace)
-save_dir = Path("./__data__/es_anytime")
-# read last line from best_history.csv
-history = save_dir / "best_history.csv"
-with open(history, "r") as fh:
-    lines = [l.strip() for l in fh if l.strip()]
-last = lines[-1].split(",")
-graph_path = Path(last[4])
-weights_path = Path(last[5])
-
-# load weights (1D array)
 weights = np.loadtxt(weights_path, delimiter=",")
 
-# load the graph (if you saved using the same JSON format)
 with open(graph_path, "r") as fh:
     graph_json = json.load(fh)
 
-# Tell NetworkX the edges are stored under "edges" (not "links")
 robot_graph = json_graph.node_link_graph(graph_json, edges="edges")
 
-# build model to infer sizes
 world = OlympicArena()
 robot = construct_mjspec_from_graph(robot_graph)
-world.spawn(robot.spec, spawn_position=SPAWN_POS)   # any legal spawn
+world.spawn(robot.spec, spawn_position=SPAWN_POS)  
 model = world.spec.compile()
 data = mj.MjData(model)
 mj.mj_resetData(model, data)
@@ -167,36 +151,27 @@ mj.mj_forward(model, data)
 
 input_size = len(data.qpos) + len(data.qvel) + 2
 output_size = model.nu
-hidden_size = 8   # must match training
+hidden_size = 8   
 
 # instantiate network
 neural_net = NeuralController(input_size, hidden_size, output_size, weights)
 
-# use the network: example forward with zeros
-inputs = np.zeros(input_size)
-outs = neural_net.forward(inputs)
-print("network output shape:", outs.shape)
-
 tracker = Tracker(mujoco_obj_to_find=mj.mjtObj.mjOBJ_GEOM, name_to_bind="core")
 tracker.setup(world.spec, data)
-tracker.update(data)  # initialize history
+tracker.update(data) 
 
-# --- Setup Stepwise controller with your trained network ---
 stepwise_ctrl = StepwiseController(
-    neural_net,     # your loaded NeuralController
+    neural_net,    
     tracker,
-    ctrl_every=5,   # control interval (as in training)
-    save_every=100, # save tracker history interval
-    alpha=0.1       # smoothing factor
+    ctrl_every=5,   
+    save_every=100, 
+    alpha=0.1       
 )
 
-# --- Tell MuJoCo to use your controller ---
 mj.set_mjcb_control(lambda m, d: stepwise_ctrl.step(m, d))
 
-# --- Launch the viewer ---
 viewer.launch(model=model, data=data)
-show_xpos_history(tracker.history["xpos"][0])
+#show_xpos_history(tracker.history["xpos"][0])
 
-# After closing the viewer, you can inspect tracker history
 print(tracker.history["xpos"][0])
 
