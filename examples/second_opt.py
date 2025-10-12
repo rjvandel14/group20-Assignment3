@@ -233,7 +233,7 @@ def experiment(robot_graph: Graph, weights) -> np.ndarray:
 
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
-    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=5000)
+    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=7000)
 
     spawn_positions = SPAWN_POS
     def objective(x): 
@@ -257,13 +257,8 @@ def experiment(robot_graph: Graph, weights) -> np.ndarray:
 
 
 def main() -> None:
-    save_dir = Path("./__data__/es_anytime")
-    history = save_dir / "best_history.csv"
-    with open(history, "r") as fh:
-        lines = [l.strip() for l in fh if l.strip()]
-    last = lines[-1].split(",")
-    graph_path = Path(last[4])
-    weights_path = Path(last[5])
+    graph_path = Path("./__data__/es_anytime/best_graph.json")
+    weights_path = Path("./__data__/es_anytime/best_weights.csv")
 
     weights = np.loadtxt(weights_path, delimiter=",")
 

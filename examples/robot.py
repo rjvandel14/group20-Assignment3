@@ -15,9 +15,14 @@ from mujoco import viewer
 import mujoco as mj
 from ariel.utils.tracker import Tracker
 
+
 graph_path = Path("./__data__/es_anytime/best_graph.json")
 weights_path = Path("./__data__/second_opt/best_weights.csv")
 SPAWN_POS = [-0.8, 0.0, 0.1]
+SCRIPT_NAME = __file__.split("/")[-1][:-3]
+CWD = Path.cwd()
+DATA = CWD / "__data__" / SCRIPT_NAME
+DATA.mkdir(exist_ok=True)
 
 def show_xpos_history(history: list[float]) -> None:
     # Create a tracking camera
