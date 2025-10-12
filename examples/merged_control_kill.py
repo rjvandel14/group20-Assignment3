@@ -65,7 +65,7 @@ TARGET_POSITION = [5, 0, 0.5]
 NONLEANER_SECONDS = 4.0   # active phase to see if we should kill
 MAX_BODY_RETRIES = 15    # how many bodies we retry before giving up
 SETTLE_SECONDS = 1.5   # let it fall/settle for a second
-KICK_SCALE = 0.7    # strength of joint kicks during test
+KICK_SCALE = 0.5 #0.7    # strength of joint kicks during test
 
 def make_decode_from_vec(num_modules: int, genotype_size: int):
     def decode_from_vec(vec: np.ndarray):
@@ -92,6 +92,7 @@ def count_from_graph(graph: Graph, name) -> int:
             if module_type in ModuleType.HINGE.name:
                 count += 1
     return count
+
 def symmetry_score(graph) -> float:
     """Return [0,1]; 1 = perfectly mirrored around x=0."""
     try:
@@ -125,7 +126,7 @@ def symmetry_score(graph) -> float:
 
     return float(np.clip(1.0 - mean_min / scale, 0.0, 1.0))
 
-def stability_penalty(graph, z_min=0.15, weight=3.0) -> float:
+def stability_penalty(graph, z_min=0.12, weight=3.0) -> float:
     """Penalty grows if average body height < z_min."""
     core = construct_mjspec_from_graph(graph)
     z_positions = [np.asarray(b.pos, float)[2]
@@ -154,12 +155,12 @@ def cma_train_controller(graph):
     sym_bonus = 0.5 * symmetry_score(graph)            # subtract later (good thing)
     pen_arch  = arch_penalty(graph, base=0.30)         # add
     pen_hinge = single_connection_hinge_penalty(graph, w_single=0.10)  # add
-    pen_stab  = stability_penalty(graph, z_min=0.15, weight=0.6)       # add (tuned lower)
+    pen_stab  = stability_penalty(graph, z_min=0.12, weight=0.4)       # add 
 
     penalty = (pen_arch + pen_hinge + pen_stab) - sym_bonus
 
     w, f = experiment(graph,penalty)
-    #f = evaluate(w, graph)
+
     print(f"[CMA] best fitness={f:.4f}")
     return w, float(f)
 
@@ -322,7 +323,7 @@ def evaluate(weights, robot_graph, spawn_pos, penalty):
 
     controller = StepwiseController(neural_net, tracker, ctrl_every=5, save_every=100, alpha=0.8)
 
-    steps = 800 #2500
+    steps = 1000 #2500
     #joint_history = []
 
     # --- EARLY BAIL SETTINGS ---
@@ -345,19 +346,58 @@ def evaluate(weights, robot_graph, spawn_pos, penalty):
         controller.step(model, data)
         mj.mj_step(model, data)
 
-# ---- Early-bail check (only in the first BAIL_SECONDS) ----
+# # ---- Early-bail check (only in the first BAIL_SECONDS) ----
+#         if start_xy is not None and k <= BAIL_STEPS and (k % CHECK_EVERY == 0):
+#             cur_xy = np.array(core_bind.xpos[:2], dtype=float)
+#             dx = float(np.linalg.norm(cur_xy - start_xy))
+#             if dx < MIN_DX_BAIL and k >= BAIL_STEPS:
+#                # hopeless controller/body combo → kill fast
+#                 print(f"[EVAL] early bail at t≈{k*dt:.2f}s (dx={dx:.4f} m < {MIN_DX_BAIL} m)")
+#                 return 1e9
+
+#     # compute fitness using tracker history and graph-based penalty
+#     f = fitness_function(tracker.history["xpos"][0], robot_graph, penalty)
+#     # add provided penalty (if any) — keep backwards-compatible
+#     return f
+
+    # before the loop
+    total_forward = 0.0                 # sum of forward-only progress
+    prev_x = float(start_xy[0]) if start_xy is not None else 0.0
+    sim_time = steps * dt               # for optional velocity-based bonus
+
+    for k in range(steps):
+        controller.step(model, data)
+        mj.mj_step(model, data)
+
+        # -------- progress accumulator (forward-only) --------
+        if start_xy is not None:
+            cur_x = float(core_bind.xpos[0])        # use [1] if forward = y
+            dx_step = cur_x - prev_x
+            if dx_step > 0.0:                       # count only forward motion
+                total_forward += dx_step
+            prev_x = cur_x
+
+        # ---- Early-bail check (only in the first BAIL_SECONDS) ----
         if start_xy is not None and k <= BAIL_STEPS and (k % CHECK_EVERY == 0):
             cur_xy = np.array(core_bind.xpos[:2], dtype=float)
             dx = float(np.linalg.norm(cur_xy - start_xy))
             if dx < MIN_DX_BAIL and k >= BAIL_STEPS:
-               # hopeless controller/body combo → kill fast
                 print(f"[EVAL] early bail at t≈{k*dt:.2f}s (dx={dx:.4f} m < {MIN_DX_BAIL} m)")
                 return 1e9
 
     # compute fitness using tracker history and graph-based penalty
     f = fitness_function(tracker.history["xpos"][0], robot_graph, penalty)
-    # add provided penalty (if any) — keep backwards-compatible
+
+    # -------- apply a small progress/velocity bonus (since we MINIMIZE, subtract it) --------
+    # Option 1: distance-based shaping (simple)
+    f -= 0.20 * total_forward
+
+    # Option 2 (alternative): velocity-based shaping (per second)
+    # progress_rate = total_forward / max(sim_time, 1e-6)
+    # f -= 0.10 * progress_rate
+
     return f
+
 
 def experiment(robot_graph: Any, penalty) -> np.ndarray:
     mj.set_mjcb_control(None)
@@ -377,7 +417,7 @@ def experiment(robot_graph: Any, penalty) -> np.ndarray:
 
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
-    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=15)# 200)
+    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=100)# 200)
     
     spawn_positions = SPAWN_POS
 
@@ -536,7 +576,7 @@ def main() -> None:
     best_graph, best_weights, best_fit = evolve_mu_plus_lambda(
         genotype_size=genotype_size,
         callbacks=callbacks,
-        cfg=ESConfig(gens=12, mu=12, lam=48, sigma_init=0.20, prescreen_retries=3, seed=SEED),
+        cfg=ESConfig(gens=12, mu=14, lam=56, sigma_init=0.18, prescreen_retries=3, seed=SEED),
         initial_parents=[smoke_vec],
     )
     print(f"[FINAL] best fitness: {best_fit:.4f}")

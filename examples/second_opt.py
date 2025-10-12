@@ -227,14 +227,14 @@ def experiment(robot_graph: Graph, weights) -> np.ndarray:
 
     # input size must match what evaluate() will later compute
     input_size = len(data_tmp.qpos) + len(data_tmp.qvel) + 2
-    hidden_size = 8
+    hidden_size = 12 #8
     output_size = model_tmp.nu
     dummy_net = NeuralController(input_size, hidden_size, output_size)
     num_params = dummy_net.num_params
 
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
-    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=200)
+    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=3500)
 
     spawn_positions = SPAWN_POS
     def objective(x):

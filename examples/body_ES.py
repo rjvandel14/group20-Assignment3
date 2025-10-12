@@ -18,8 +18,8 @@ class ESConfig:
     sigma_init: float = 0.15
     prescreen_retries: int = 3
     seed: int = 42
-    verbose: bool = True                  # << add this
-    print_every: int = 1                  # << print each gen (or set to 5, etc.)
+    verbose: bool = True                  
+    print_every: int = 1                  
     save_dir: str = "./__data__/es_anytime"
 
 @dataclass
@@ -45,7 +45,6 @@ def evolve_mu_plus_lambda(
         with open(best_history_csv, "w", newline="") as fh:
             writer = csv.writer(fh)
             writer.writerow(["timestamp", "gen", "fitness", "note", "graph_path", "weights_path"])
-
 
     dim = 3 * genotype_size
     tau_prime = 1 / np.sqrt(2 * dim)
@@ -116,7 +115,6 @@ def evolve_mu_plus_lambda(
 
             if cfg.verbose:
                 print(f"[ES SAVE] New best saved: gen={gen} fitness={best_f:.6f} -> {graph_fn}, {weights_fn}")
-
 
     def eval_and_push(x, note=""):
         sigma = np.full(dim, cfg.sigma_init)
