@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 type ViewerTypes = Literal["launcher", "video", "simple", "no_control", "frame"]
 
 # --- RANDOM GENERATOR SETUP --- #
-SEED = 222
+SEED = 111
 RNG = np.random.default_rng(SEED)
 np.random.seed(SEED)
 random.seed(SEED)
@@ -65,7 +65,7 @@ TARGET_POSITION = [5, 0, 0.5]
 NONLEANER_SECONDS = 4.0   # active phase to see if we should kill
 MAX_BODY_RETRIES = 15    # how many bodies we retry before giving up
 SETTLE_SECONDS = 1.5   # let it fall/settle for a second
-KICK_SCALE = 0.5 #0.7    # strength of joint kicks during test
+KICK_SCALE = 0.5 #    # strength of joint kicks during test
 
 def make_decode_from_vec(num_modules: int, genotype_size: int):
     def decode_from_vec(vec: np.ndarray):
@@ -152,10 +152,10 @@ def arch_penalty(graph, base=0.30) -> float:
 def cma_train_controller(graph):
     print("[CMA] starting...")
 
-    sym_bonus = 0.3 * symmetry_score(graph)            # subtract later (good thing)
-    pen_arch  = arch_penalty(graph, base=0.20)         # add
-    pen_hinge = single_connection_hinge_penalty(graph, w_single=0.10)  # add
-    pen_stab  = stability_penalty(graph, z_min=0.12, weight=0.4)       # add 
+    sym_bonus = 0.3 * symmetry_score(graph)            
+    pen_arch  = arch_penalty(graph, base=0.20)         
+    pen_hinge = single_connection_hinge_penalty(graph, w_single=0.10) 
+    pen_stab  = stability_penalty(graph, z_min=0.12, weight=0.4)       
 
     penalty = (pen_arch + pen_hinge + pen_stab) - sym_bonus
 
@@ -175,19 +175,7 @@ def fitness_function(history: list[float], graph : Graph, penalty) -> float:
         (xt - xc) ** 2 + (yt - yc) ** 2 + (zt - zc) ** 2,
     )
 
-    return cartesian_distance+penalty
-
-
-# def fitness(history: list[float], joint_history):
-#     final_pos = history[-1]
-#     displacement_y = abs(final_pos[1])
-#     displacement_x = final_pos[0]
-
-#     oscillation_reward = np.mean(np.std(joint_history, axis=0))
-#     saturation_penalty = np.mean(np.abs(np.abs(joint_history) - (np.pi / 2)))
-
-#     fitness = displacement_x + 0.08 * oscillation_reward - 0.08 * saturation_penalty - 0.3 * displacement_y
-#     return fitness
+    return cartesian_distance + penalty
 
 def show_xpos_history(history: list[float]) -> None:
     # Create a tracking camera
@@ -345,57 +333,18 @@ def evaluate(weights, robot_graph, spawn_pos, penalty):
         controller.step(model, data)
         mj.mj_step(model, data)
 
-# # ---- Early-bail check (only in the first BAIL_SECONDS) ----
-#         if start_xy is not None and k <= BAIL_STEPS and (k % CHECK_EVERY == 0):
-#             cur_xy = np.array(core_bind.xpos[:2], dtype=float)
-#             dx = float(np.linalg.norm(cur_xy - start_xy))
-#             if dx < MIN_DX_BAIL and k >= BAIL_STEPS:
-#                # hopeless controller/body combo → kill fast
-#                 print(f"[EVAL] early bail at t≈{k*dt:.2f}s (dx={dx:.4f} m < {MIN_DX_BAIL} m)")
-#                 return 1e9
-
-#     # compute fitness using tracker history and graph-based penalty
-#     f = fitness_function(tracker.history["xpos"][0], robot_graph, penalty)
-#     # add provided penalty (if any) — keep backwards-compatible
-#     return f
-
-    # before the loop
-    total_forward = 0.0                 # sum of forward-only progress
-    prev_x = float(start_xy[0]) if start_xy is not None else 0.0
-    sim_time = steps * dt               # for optional velocity-based bonus
-
-    for k in range(steps):
-        controller.step(model, data)
-        mj.mj_step(model, data)
-
-        # -------- progress accumulator (forward-only) --------
-        if start_xy is not None:
-            cur_x = float(core_bind.xpos[0])        # use [1] if forward = y
-            dx_step = cur_x - prev_x
-            if dx_step > 0.0:                       # count only forward motion
-                total_forward += dx_step
-            prev_x = cur_x
-
-        # ---- Early-bail check (only in the first BAIL_SECONDS) ----
+# ---- Early-bail check (only in the first BAIL_SECONDS) ----
         if start_xy is not None and k <= BAIL_STEPS and (k % CHECK_EVERY == 0):
             cur_xy = np.array(core_bind.xpos[:2], dtype=float)
             dx = float(np.linalg.norm(cur_xy - start_xy))
             if dx < MIN_DX_BAIL and k >= BAIL_STEPS:
+               # hopeless controller/body combo → kill fast
                 print(f"[EVAL] early bail at t≈{k*dt:.2f}s (dx={dx:.4f} m < {MIN_DX_BAIL} m)")
                 return 1e9
 
     f = fitness_function(tracker.history["xpos"][0], robot_graph, penalty)
 
-    # -------- apply a small progress/velocity bonus (since we MINIMIZE, subtract it) --------
-    # Option 1: distance-based shaping (simple)
-    f -= 0.20 * total_forward
-
-    # Option 2 (alternative): velocity-based shaping (per second)
-    # progress_rate = total_forward / max(sim_time, 1e-6)
-    # f -= 0.10 * progress_rate
-
     return f
-
 
 def experiment(robot_graph: Any, penalty) -> np.ndarray:
     mj.set_mjcb_control(None)
