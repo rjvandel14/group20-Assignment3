@@ -65,7 +65,7 @@ TARGET_POSITION = [5, 0, 0.5]
 NONLEANER_SECONDS = 4.0   # active phase to see if we should kill
 MAX_BODY_RETRIES = 15    # how many bodies we retry before giving up
 SETTLE_SECONDS = 1.5   # let it fall/settle for a second
-KICK_SCALE = 0.5 #    # strength of joint kicks during test
+KICK_SCALE = 0.5     # strength of joint kicks during test
 
 def make_decode_from_vec(num_modules: int, genotype_size: int):
     def decode_from_vec(vec: np.ndarray):
@@ -435,9 +435,9 @@ def is_learning(robot_graph) -> tuple[bool, float, float]:
     MIN_V_RMS = 0.01   # approx 1 cm/s over last 1 s, robot must show some speed
 
     # timing
-    dt = model.opt.timestep # get simulation time step
-    settle_steps = max(1, int(SETTLE_SECONDS / dt)) # how many steps in the settling phase
-    active_steps = max(1, int(NONLEANER_SECONDS / dt)) # how many steps in the active test phase
+    dt = model.opt.timestep 
+    settle_steps = max(1, int(SETTLE_SECONDS / dt)) 
+    active_steps = max(1, int(NONLEANER_SECONDS / dt)) 
 
     # phase 1: settle (no control), let it fall and stabilize
     data.ctrl[:] = 0.0
@@ -453,10 +453,10 @@ def is_learning(robot_graph) -> tuple[bool, float, float]:
     # phase 2: active phase - movement test
     # apply random movements in joints to see if robot is capable of moving
     for _ in range(active_steps):
-        data.ctrl[:] = KICK_SCALE * random_move(model, data) # random control signal to every joint
-        mj.mj_step(model, data) # react to applied torques
-        cur_xy = np.array(core_bind.xpos[:2], dtype=float) # xy-position in this step
-        speed = np.linalg.norm(cur_xy - prev_xy) / dt # how fast robot moved in this step
+        data.ctrl[:] = KICK_SCALE * random_move(model, data) 
+        mj.mj_step(model, data) 
+        cur_xy = np.array(core_bind.xpos[:2], dtype=float) 
+        speed = np.linalg.norm(cur_xy - prev_xy) / dt 
         v_hist.append(speed)
         floor_contact |= (data.ncon > 0) # at least one contact with floor
         prev_xy = cur_xy
@@ -465,7 +465,7 @@ def is_learning(robot_graph) -> tuple[bool, float, float]:
     last_1s = max(1, int(1.0 / dt))
     speed_end = float(np.sqrt(np.mean(np.square(v_hist[-last_1s:]))) if v_hist else 0.0)
 
-    # pass rule (your AND rule)
+    # passed when contact with floor and minimal movement and speed 
     passed = floor_contact and ((dx >= MIN_DX) or (speed_end >= MIN_V_RMS))
 
     status = "robot passed" if passed else "killed"
