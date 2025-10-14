@@ -322,8 +322,7 @@ def evaluate(weights, robot_graph, spawn_pos, penalty):
 
     controller = StepwiseController(neural_net, tracker, ctrl_every=5, save_every=100, alpha=0.1)
 
-    steps = 1000 #2500
-    #joint_history = []
+    steps = 1000 
 
     # --- EARLY BAIL SETTINGS ---
     dt = model.opt.timestep
@@ -354,15 +353,12 @@ def evaluate(weights, robot_graph, spawn_pos, penalty):
                 print(f"[EVAL] early bail at t≈{k*dt:.2f}s (dx={dx:.4f} m < {MIN_DX_BAIL} m)")
                 return 1e9
 
-    # compute fitness using tracker history and graph-based penalty
     f = fitness_function(tracker.history["xpos"][0], robot_graph, penalty)
-    # add provided penalty (if any) — keep backwards-compatible
     return f
 
 def experiment(robot_graph: Any, penalty) -> np.ndarray:
     mj.set_mjcb_control(None)
     robot = construct_mjspec_from_graph(robot_graph)
-    # robot = gecko()
     world = OlympicArena()
     world.spawn(robot.spec, spawn_position=SPAWN_POS[0])
 
