@@ -1,43 +1,27 @@
 # Standard library
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING
 
 # Third-party libraries
-import matplotlib.pyplot as plt
-import mujoco as mj
-import numpy as np
-import numpy.typing as npt
-from mujoco import viewer
-import random
-import nevergrad as ng
-from networkx import Graph
-import csv
 import json
+import random
+import numpy as np
+import mujoco as mj
+import nevergrad as ng
+from mujoco import viewer
+from networkx import Graph
 from networkx.readwrite import json_graph
 
 # Local libraries
 from ariel.body_phenotypes.robogen_lite.constructor import (
     construct_mjspec_from_graph,
 )
-from ariel.body_phenotypes.robogen_lite.decoders.hi_prob_decoding import (
-    HighProbabilityDecoder,
-    save_graph_as_json,
-)
 from ariel.body_phenotypes.robogen_lite.config import (
     ModuleType,
 )
-from ariel.body_phenotypes.robogen_lite.modules.hinge import HingeModule
-from ariel.utils.renderers import single_frame_renderer, video_renderer
-from ariel.body_phenotypes.robogen_lite.prebuilt_robots.gecko import gecko
-from ariel.ec.genotypes.nde import NeuralDevelopmentalEncoding
-from ariel.body_phenotypes.robogen_lite.modules.brick import BrickModule
-from ariel.simulation.environments import OlympicArena
 from ariel.utils.tracker import Tracker
+from ariel.simulation.environments import OlympicArena
 from z_ec_course.A3_plot_function import show_xpos_history
-
-# Type Checking
-if TYPE_CHECKING:
-    from networkx import DiGraph
 
 SCRIPT_NAME = __file__.split("/")[-1][:-3]
 CWD = Path.cwd()
@@ -142,39 +126,30 @@ def evaluate(weights, robot_graph, spawn_pos):
         mj.mj_step(model, data)
         joint_history.append(data.ctrl.copy())
 
-    # Return fitness computed from the tracker's recorded xpos
     return fitness_function(tracker.history["xpos"][0])
 
 def experiment(robot_graph: Graph, weights) -> np.ndarray:
     mj.set_mjcb_control(None)
 
-    # Construct robot and spawn it into a temporary world so we can compile the correct model
+    # Construct robot and spawn it into a temporary world to compile the correct model
     robot = construct_mjspec_from_graph(robot_graph)
     world = OlympicArena()
-    # spawn at one of your training starts so the compiled model includes the robot's DOFs
     world.spawn(robot.spec, position=SPAWN_POS[0], correct_collision_with_floor=True,)
-
-    # Compile model that actually contains the robot to get correct qpos/qvel sizes
     model_tmp = world.spec.compile()
     data_tmp = mj.MjData(model_tmp)
     mj.mj_resetData(model_tmp, data_tmp)
     mj.mj_forward(model_tmp, data_tmp)
 
-    # input size must match what evaluate() will later compute
     input_size = len(data_tmp.qpos) + len(data_tmp.qvel) + 2
-    hidden_size = 8
-    output_size = model_tmp.nu
-    dummy_net = NeuralController(input_size, hidden_size, output_size)
+    dummy_net = NeuralController(input_size, 8, model_tmp.nu)
     num_params = dummy_net.num_params
 
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
-    print("optimizing has begon")
     optimizer = ng.optimizers.CMA(parametrization=num_params, budget=7000)
 
     spawn_positions = SPAWN_POS
     def objective(x): 
-        # convert candidate to numpy array (nevergrad may pass wrapper objects)
         weights = np.asarray(x)
 
         scores = []
@@ -198,7 +173,6 @@ def main() -> None:
     weights_path = Path("./__data__/second_opt/best_weights roos.csv")
 
     weights = np.loadtxt(weights_path, delimiter=",")
-
     with open(graph_path, "r") as fh:
         graph_json = json.load(fh)
 
