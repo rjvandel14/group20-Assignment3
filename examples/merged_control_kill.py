@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 type ViewerTypes = Literal["launcher", "video", "simple", "no_control", "frame"]
 
 # --- RANDOM GENERATOR SETUP --- #
-SEED = 111
+SEED = 222
 RNG = np.random.default_rng(SEED)
 np.random.seed(SEED)
 random.seed(SEED)
@@ -152,8 +152,8 @@ def arch_penalty(graph, base=0.30) -> float:
 def cma_train_controller(graph):
     print("[CMA] starting...")
 
-    sym_bonus = 0.5 * symmetry_score(graph)            # subtract later (good thing)
-    pen_arch  = arch_penalty(graph, base=0.30)         # add
+    sym_bonus = 0.3 * symmetry_score(graph)            # subtract later (good thing)
+    pen_arch  = arch_penalty(graph, base=0.20)         # add
     pen_hinge = single_connection_hinge_penalty(graph, w_single=0.10)  # add
     pen_stab  = stability_penalty(graph, z_min=0.12, weight=0.4)       # add 
 
@@ -321,10 +321,9 @@ def evaluate(weights, robot_graph, spawn_pos, penalty):
     input_size = len(data.qpos) + len(data.qvel) + 2
     neural_net = NeuralController(input_size, 8, model.nu, weights)
 
-    controller = StepwiseController(neural_net, tracker, ctrl_every=5, save_every=100, alpha=0.8)
+    controller = StepwiseController(neural_net, tracker, ctrl_every=5, save_every=100, alpha=0.1)
 
-    steps = 1000 #2500
-    #joint_history = []
+    steps = 1000 
 
     # --- EARLY BAIL SETTINGS ---
     dt = model.opt.timestep
@@ -385,7 +384,6 @@ def evaluate(weights, robot_graph, spawn_pos, penalty):
                 print(f"[EVAL] early bail at t≈{k*dt:.2f}s (dx={dx:.4f} m < {MIN_DX_BAIL} m)")
                 return 1e9
 
-    # compute fitness using tracker history and graph-based penalty
     f = fitness_function(tracker.history["xpos"][0], robot_graph, penalty)
 
     # -------- apply a small progress/velocity bonus (since we MINIMIZE, subtract it) --------
@@ -402,7 +400,6 @@ def evaluate(weights, robot_graph, spawn_pos, penalty):
 def experiment(robot_graph: Any, penalty) -> np.ndarray:
     mj.set_mjcb_control(None)
     robot = construct_mjspec_from_graph(robot_graph)
-    # robot = gecko()
     world = OlympicArena()
     world.spawn(robot.spec, spawn_position=SPAWN_POS[0])
 
