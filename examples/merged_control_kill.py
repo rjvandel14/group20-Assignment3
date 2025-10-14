@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 type ViewerTypes = Literal["launcher", "video", "simple", "no_control", "frame"]
 
 # --- RANDOM GENERATOR SETUP --- #
-SEED = 222
+SEED = 111
 RNG = np.random.default_rng(SEED)
 np.random.seed(SEED)
 random.seed(SEED)
@@ -65,7 +65,7 @@ TARGET_POSITION = [5, 0, 0.5]
 NONLEANER_SECONDS = 4.0   # active phase to see if we should kill
 MAX_BODY_RETRIES = 15    # how many bodies we retry before giving up
 SETTLE_SECONDS = 1.5   # let it fall/settle for a second
-KICK_SCALE = 0.7    # strength of joint kicks during test
+KICK_SCALE = 0.5     # strength of joint kicks during test
 
 def make_decode_from_vec(num_modules: int, genotype_size: int):
     def decode_from_vec(vec: np.ndarray):
@@ -92,6 +92,7 @@ def count_from_graph(graph: Graph, name) -> int:
             if module_type in ModuleType.HINGE.name:
                 count += 1
     return count
+
 def symmetry_score(graph) -> float:
     """Return [0,1]; 1 = perfectly mirrored around x=0."""
     try:
@@ -125,7 +126,7 @@ def symmetry_score(graph) -> float:
 
     return float(np.clip(1.0 - mean_min / scale, 0.0, 1.0))
 
-def stability_penalty(graph, z_min=0.15, weight=3.0) -> float:
+def stability_penalty(graph, z_min=0.12, weight=3.0) -> float:
     """Penalty grows if average body height < z_min."""
     core = construct_mjspec_from_graph(graph)
     z_positions = [np.asarray(b.pos, float)[2]
@@ -151,15 +152,15 @@ def arch_penalty(graph, base=0.30) -> float:
 def cma_train_controller(graph):
     print("[CMA] starting...")
 
-    sym_bonus = 0.3 * symmetry_score(graph)            # subtract later (good thing)
-    pen_arch  = arch_penalty(graph, base=0.20)         # add
-    pen_hinge = single_connection_hinge_penalty(graph, w_single=0.10)  # add
-    pen_stab  = stability_penalty(graph, z_min=0.15, weight=0.2)       # add (tuned lower)
+    sym_bonus = 0.3 * symmetry_score(graph)            
+    pen_arch  = arch_penalty(graph, base=0.20)         
+    pen_hinge = single_connection_hinge_penalty(graph, w_single=0.10) 
+    pen_stab  = stability_penalty(graph, z_min=0.12, weight=0.4)       
 
     penalty = (pen_arch + pen_hinge + pen_stab) - sym_bonus
 
     w, f = experiment(graph,penalty)
-    #f = evaluate(w, graph)
+
     print(f"[CMA] best fitness={f:.4f}")
     return w, float(f)
 
@@ -174,19 +175,7 @@ def fitness_function(history: list[float], graph : Graph, penalty) -> float:
         (xt - xc) ** 2 + (yt - yc) ** 2 + (zt - zc) ** 2,
     )
 
-    return cartesian_distance+penalty
-
-
-# def fitness(history: list[float], joint_history):
-#     final_pos = history[-1]
-#     displacement_y = abs(final_pos[1])
-#     displacement_x = final_pos[0]
-
-#     oscillation_reward = np.mean(np.std(joint_history, axis=0))
-#     saturation_penalty = np.mean(np.abs(np.abs(joint_history) - (np.pi / 2)))
-
-#     fitness = displacement_x + 0.08 * oscillation_reward - 0.08 * saturation_penalty - 0.3 * displacement_y
-#     return fitness
+    return cartesian_distance + penalty
 
 def show_xpos_history(history: list[float]) -> None:
     # Create a tracking camera
@@ -354,6 +343,7 @@ def evaluate(weights, robot_graph, spawn_pos, penalty):
                 return 1e9
 
     f = fitness_function(tracker.history["xpos"][0], robot_graph, penalty)
+
     return f
 
 def experiment(robot_graph: Any, penalty) -> np.ndarray:
@@ -373,7 +363,7 @@ def experiment(robot_graph: Any, penalty) -> np.ndarray:
 
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
-    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=200)# 200)
+    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=100)# 200)
     
     spawn_positions = SPAWN_POS
 
@@ -445,9 +435,9 @@ def is_learning(robot_graph) -> tuple[bool, float, float]:
     MIN_V_RMS = 0.01   # approx 1 cm/s over last 1 s, robot must show some speed
 
     # timing
-    dt = model.opt.timestep # get simulation time step
-    settle_steps = max(1, int(SETTLE_SECONDS / dt)) # how many steps in the settling phase
-    active_steps = max(1, int(NONLEANER_SECONDS / dt)) # how many steps in the active test phase
+    dt = model.opt.timestep 
+    settle_steps = max(1, int(SETTLE_SECONDS / dt)) 
+    active_steps = max(1, int(NONLEANER_SECONDS / dt)) 
 
     # phase 1: settle (no control), let it fall and stabilize
     data.ctrl[:] = 0.0
@@ -463,10 +453,10 @@ def is_learning(robot_graph) -> tuple[bool, float, float]:
     # phase 2: active phase - movement test
     # apply random movements in joints to see if robot is capable of moving
     for _ in range(active_steps):
-        data.ctrl[:] = KICK_SCALE * random_move(model, data) # random control signal to every joint
-        mj.mj_step(model, data) # react to applied torques
-        cur_xy = np.array(core_bind.xpos[:2], dtype=float) # xy-position in this step
-        speed = np.linalg.norm(cur_xy - prev_xy) / dt # how fast robot moved in this step
+        data.ctrl[:] = KICK_SCALE * random_move(model, data) 
+        mj.mj_step(model, data) 
+        cur_xy = np.array(core_bind.xpos[:2], dtype=float) 
+        speed = np.linalg.norm(cur_xy - prev_xy) / dt 
         v_hist.append(speed)
         floor_contact |= (data.ncon > 0) # at least one contact with floor
         prev_xy = cur_xy
@@ -475,7 +465,7 @@ def is_learning(robot_graph) -> tuple[bool, float, float]:
     last_1s = max(1, int(1.0 / dt))
     speed_end = float(np.sqrt(np.mean(np.square(v_hist[-last_1s:]))) if v_hist else 0.0)
 
-    # pass rule (your AND rule)
+    # passed when contact with floor and minimal movement and speed 
     passed = floor_contact and ((dx >= MIN_DX) or (speed_end >= MIN_V_RMS))
 
     status = "robot passed" if passed else "killed"
@@ -532,7 +522,7 @@ def main() -> None:
     best_graph, best_weights, best_fit = evolve_mu_plus_lambda(
         genotype_size=genotype_size,
         callbacks=callbacks,
-        cfg=ESConfig(gens=15, mu=14, lam=42, sigma_init=0.15, prescreen_retries=3, seed=SEED),
+        cfg=ESConfig(gens=12, mu=14, lam=56, sigma_init=0.18, prescreen_retries=3, seed=SEED),
         initial_parents=[smoke_vec],
     )
     print(f"[FINAL] best fitness: {best_fit:.4f}")

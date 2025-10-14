@@ -12,21 +12,22 @@ DiGraph = "DiGraph"
 
 @dataclass
 class ESConfig:
+    # Stores all settings
     gens: int = 12
     mu: int = 12
     lam: int = 60
     sigma_init: float = 0.15
     prescreen_retries: int = 3
     seed: int = 42
-    verbose: bool = True                  # << add this
-    print_every: int = 1                  # << print each gen (or set to 5, etc.)
+    verbose: bool = True                  
+    print_every: int = 1                  
     save_dir: str = "./__data__/es_anytime"
 
 @dataclass
 class Callbacks:
-    decode_from_vec: Callable[[np.ndarray], DiGraph]
-    prescreen: Callable[[DiGraph], Tuple[bool, float, float]]
-    train_controller: Callable[[DiGraph], Tuple[np.ndarray, float]]
+    decode_from_vec: Callable[[np.ndarray], DiGraph] # How to tern a number vector into a robot body
+    prescreen: Callable[[DiGraph], Tuple[bool, float, float]] # Filter to kill bad bodies before training
+    train_controller: Callable[[DiGraph], Tuple[np.ndarray, float]] # Train the controller and reutrn weights and fitness
 
 def evolve_mu_plus_lambda(
     genotype_size: int,
@@ -34,18 +35,25 @@ def evolve_mu_plus_lambda(
     cfg: ESConfig = ESConfig(),
     initial_parents=None
 ) -> Tuple[DiGraph, np.ndarray, float]:
+    """
+    (μ+λ) Evolution Strategy with self-adaptive mutation.
+    - Minimization: lower fitness is better.
+    - Bodies are encoded as vectors in [0,1]^dim, decoded to graphs, prescreened,
+      then evaluated by training a controller to get a fitness.
+    Returns: (best_graph, best_controller_weights, best_fitness)
+    """
+
     rng = np.random.default_rng(cfg.seed)
 
     # Prepare save directory for anytime snapshots
     save_dir = Path(cfg.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     best_history_csv = save_dir / "best_history.csv"
-    # create CSV header if not exists
+   
     if not best_history_csv.exists():
         with open(best_history_csv, "w", newline="") as fh:
             writer = csv.writer(fh)
             writer.writerow(["timestamp", "gen", "fitness", "note", "graph_path", "weights_path"])
-
 
     dim = 3 * genotype_size
     tau_prime = 1 / np.sqrt(2 * dim)
@@ -53,6 +61,7 @@ def evolve_mu_plus_lambda(
 
     def make_feasible(x): return np.clip(x, 0, 1)
 
+    # Try to decode and pass the prescreen before training
     def try_decode_and_prescreen(x):
         for trial in range(1, cfg.prescreen_retries + 1):
             g = callbacks.decode_from_vec(x)
@@ -117,7 +126,7 @@ def evolve_mu_plus_lambda(
             if cfg.verbose:
                 print(f"[ES SAVE] New best saved: gen={gen} fitness={best_f:.6f} -> {graph_fn}, {weights_fn}")
 
-
+    # Evaluate a vector, create its sigma vector and store as parent. 
     def eval_and_push(x, note=""):
         sigma = np.full(dim, cfg.sigma_init)
         f, g, w = evaluate_body(x)
@@ -126,14 +135,14 @@ def evolve_mu_plus_lambda(
             tag = f" ({note})" if note else ""
             print(f"[ES] init parent {len(parents)}/{cfg.mu}{tag} | f={f:.4f}")
 
-    # (A) use provided seeds first (if any)
+    # use provided seeds first (if any)
     if initial_parents:
         for vec in initial_parents[:cfg.mu]:
             vec = np.asarray(vec, dtype=float)
             vec = np.clip(vec, 0, 1)
             eval_and_push(vec, note="seed")
 
-    # (B) fill the rest with randoms
+    # fill the rest with randoms
     while len(parents) < cfg.mu:
         x = rng.random(dim)
         eval_and_push(x, note="rand")
@@ -143,14 +152,19 @@ def evolve_mu_plus_lambda(
     # Main ES loop
     for gen in range(1, cfg.gens + 1):
         offspring = []
+        # create lambda offspring
         for _ in range(cfg.lam):
             p = parents[rng.integers(cfg.mu)]
+            # self adaptation
             z0, z = rng.standard_normal(), rng.standard_normal(dim)
             sigma_c = p[1] * np.exp(tau_prime * z0 + tau * z)
+            # mutate the genotype using the sigma 
             x_c = make_feasible(p[0] + sigma_c * rng.standard_normal(dim))
+            # evaluate child
             f, g, w = evaluate_body(x_c)
             offspring.append([x_c, sigma_c, f, g, w])
 
+        # select best ones
         pool = parents + offspring
         pool.sort(key=lambda ind: ind[2])
         parents = pool[:cfg.mu]
