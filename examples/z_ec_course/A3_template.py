@@ -142,7 +142,6 @@ def fitness_function(history: list[tuple[float, float, float]],graph: Graph) -> 
     xt, yt, zt = TARGET_POSITION
     xc, yc, zc = history[-1]
 
-    # Minimize the distance --> maximize the negative distance
     cartesian_distance = np.sqrt(
         (xt - xc) ** 2 + (yt - yc) ** 2 + (zt - zc) ** 2,
     )
