@@ -33,6 +33,7 @@ from ariel.ec.genotypes.nde import NeuralDevelopmentalEncoding
 from ariel.body_phenotypes.robogen_lite.modules.brick import BrickModule
 from ariel.simulation.environments import OlympicArena
 from ariel.utils.tracker import Tracker
+from z_ec_course.A3_plot_function import show_xpos_history
 
 # Type Checking
 if TYPE_CHECKING:
@@ -55,70 +56,70 @@ np.random.seed(SEED)
 random.seed(SEED)
 
 
-def show_xpos_history(history: list[float]) -> None:
-    # Create a tracking camera
-    camera = mj.MjvCamera()
-    camera.type = mj.mjtCamera.mjCAMERA_FREE
-    camera.lookat = [2.5, 0, 0]
-    camera.distance = 10
-    camera.azimuth = 0
-    camera.elevation = -90
+# def show_xpos_history(history: list[float]) -> None:
+#     # Create a tracking camera
+#     camera = mj.MjvCamera()
+#     camera.type = mj.mjtCamera.mjCAMERA_FREE
+#     camera.lookat = [2.5, 0, 0]
+#     camera.distance = 10
+#     camera.azimuth = 0
+#     camera.elevation = -90
 
-    # Initialize world to get the background
-    mj.set_mjcb_control(None)
-    world = OlympicArena()
-    model = world.spec.compile()
-    data = mj.MjData(model)
-    save_path = str(DATA / "background.png")
-    single_frame_renderer(
-        model,
-        data,
-        camera=camera,
-        save_path=save_path,
-        save=True,
-    )
+#     # Initialize world to get the background
+#     mj.set_mjcb_control(None)
+#     world = OlympicArena()
+#     model = world.spec.compile()
+#     data = mj.MjData(model)
+#     save_path = str(DATA / "background.png")
+#     single_frame_renderer(
+#         model,
+#         data,
+#         camera=camera,
+#         save_path=save_path,
+#         save=True,
+#     )
 
-    # Setup background image
-    img = plt.imread(save_path)
-    _, ax = plt.subplots()
-    ax.imshow(img)
-    w, h, _ = img.shape
+#     # Setup background image
+#     img = plt.imread(save_path)
+#     _, ax = plt.subplots()
+#     ax.imshow(img)
+#     w, h, _ = img.shape
 
-    # Convert list of [x,y,z] positions to numpy array
-    pos_data = np.array(history)
+#     # Convert list of [x,y,z] positions to numpy array
+#     pos_data = np.array(history)
 
-    # Calculate initial position
-    x0, y0 = int(h * 0.483), int(w * 0.815)
-    xc, yc = int(h * 0.483), int(w * 0.9205)
-    ym0, ymc = 0, SPAWN_POS[0][0]
+#     # Calculate initial position
+#     x0, y0 = int(h * 0.483), int(w * 0.815)
+#     xc, yc = int(h * 0.483), int(w * 0.9205)
+#     ym0, ymc = 0, SPAWN_POS[0][0]
 
-    # Convert position data to pixel coordinates
-    pixel_to_dist = -((ymc - ym0) / (yc - y0))
-    pos_data_pixel = [[xc, yc]]
-    for i in range(len(pos_data) - 1):
-        xi, yi, _ = pos_data[i]
-        xj, yj, _ = pos_data[i + 1]
-        xd, yd = (xj - xi) / pixel_to_dist, (yj - yi) / pixel_to_dist
-        xn, yn = pos_data_pixel[i]
-        pos_data_pixel.append([xn + int(xd), yn + int(yd)])
-    pos_data_pixel = np.array(pos_data_pixel)
+#     # Convert position data to pixel coordinates
+#     pixel_to_dist = -((ymc - ym0) / (yc - y0))
+#     pos_data_pixel = [[xc, yc]]
+#     for i in range(len(pos_data) - 1):
+#         xi, yi, _ = pos_data[i]
+#         xj, yj, _ = pos_data[i + 1]
+#         xd, yd = (xj - xi) / pixel_to_dist, (yj - yi) / pixel_to_dist
+#         xn, yn = pos_data_pixel[i]
+#         pos_data_pixel.append([xn + int(xd), yn + int(yd)])
+#     pos_data_pixel = np.array(pos_data_pixel)
 
-    # Plot x,y trajectory
-    ax.plot(x0, y0, "kx", label="[0, 0, 0]")
-    ax.plot(xc, yc, "go", label="Start")
-    ax.plot(pos_data_pixel[:, 0], pos_data_pixel[:, 1], "b-", label="Path")
-    ax.plot(pos_data_pixel[-1, 0], pos_data_pixel[-1, 1], "ro", label="End")
+#     # Plot x,y trajectory
+#     ax.plot(x0, y0, "kx", label="[0, 0, 0]")
+#     ax.plot(xc, yc, "go", label="Start")
+#     ax.plot(pos_data_pixel[:, 0], pos_data_pixel[:, 1], "b-", label="Path")
+#     ax.plot(pos_data_pixel[-1, 0], pos_data_pixel[-1, 1], "ro", label="End")
 
-    # Add labels and title
-    ax.set_xlabel("X Position")
-    ax.set_ylabel("Y Position")
-    ax.legend()
+#     # Add labels and title
+#     ax.set_xlabel("X Position")
+#     ax.set_ylabel("Y Position")
+#     ax.legend()
 
-    # Title
-    plt.title("Robot Path in XY Plane")
+#     # Title
+#     plt.title("Robot Path in XY Plane")
 
-    # Show results
-    plt.show()
+#     # Show results
+#     plt.show()
 class NeuralController:
     def __init__(self, input_size, hidden_size, output_size, weights=None):
         self.input_size = input_size
@@ -182,7 +183,7 @@ def evaluate(weights, robot_graph, spawn_pos):
     world = OlympicArena()
     mj.set_mjcb_control(None)
     robot = construct_mjspec_from_graph(robot_graph)
-    world.spawn(robot.spec, spawn_position=spawn_pos)
+    world.spawn(robot.spec, position=spawn_pos, correct_collision_with_floor=True,)
 
     model = world.spec.compile()
     data = mj.MjData(model)
@@ -216,7 +217,7 @@ def experiment(robot_graph: Graph, weights) -> np.ndarray:
     robot = construct_mjspec_from_graph(robot_graph)
     world = OlympicArena()
     # spawn at one of your training starts so the compiled model includes the robot's DOFs
-    world.spawn(robot.spec, spawn_position=SPAWN_POS[0])
+    world.spawn(robot.spec, position=SPAWN_POS[0], correct_collision_with_floor=True,)
 
     # Compile model that actually contains the robot to get correct qpos/qvel sizes
     model_tmp = world.spec.compile()
@@ -233,6 +234,7 @@ def experiment(robot_graph: Graph, weights) -> np.ndarray:
 
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
+    print("optimizing has begon")
     optimizer = ng.optimizers.CMA(parametrization=num_params, budget=7000)
 
     spawn_positions = SPAWN_POS
@@ -258,7 +260,7 @@ def experiment(robot_graph: Graph, weights) -> np.ndarray:
 
 def main() -> None:
     graph_path = Path("./__data__/es_anytime/best_graph.json")
-    weights_path = Path("./__data__/es_anytime/best_weights.csv")
+    weights_path = Path("./__data__/second_opt/best_weights roos.csv")
 
     weights = np.loadtxt(weights_path, delimiter=",")
 
@@ -274,7 +276,7 @@ def main() -> None:
     np.savetxt(best_weights_path, best_weights, delimiter=",")
 
     world = OlympicArena()
-    world.spawn(robot.spec, spawn_position=SPAWN_POS[0])  
+    world.spawn(robot.spec, position=SPAWN_POS[0], correct_collision_with_floor=True,)  
     model = world.spec.compile()
     data = mj.MjData(model)
     mj.mj_resetData(model, data)
@@ -291,7 +293,7 @@ def main() -> None:
     viewer.launch(model=model, data=data)
 
     print(tracker.history["xpos"][0])
-    show_xpos_history(tracker.history["xpos"][0])
+    show_xpos_history(tracker.history["xpos"][0], spawn_position=SPAWN_POS, target_position=TARGET_POSITION)
 
 
 if __name__ == "__main__":

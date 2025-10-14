@@ -9,6 +9,10 @@ import mujoco as mj
 import numpy as np
 import numpy.typing as npt
 from mujoco import viewer
+from networkx import Graph
+from ariel.body_phenotypes.robogen_lite.config import (
+    ModuleType,
+)
 
 # Local libraries
 from ariel import console
@@ -45,7 +49,11 @@ DATA = CWD / "__data__" / SCRIPT_NAME
 DATA.mkdir(exist_ok=True)
 
 # Global variables
-SPAWN_POS = [-0.8, 0, 0]
+SPAWN_POS = [
+    [-0.8, 0.0, 0.1],
+    [1.0, 0.0, 0.2],
+    [3.0, 0.0, 0.2],
+]
 NUM_OF_MODULES = 30
 TARGET_POSITION = [5, 0, 0.5]
 
@@ -53,7 +61,84 @@ TARGET_POSITION = [5, 0, 0.5]
 from A3_plot_function import show_xpos_history
 
 
-def fitness_function(history: list[tuple[float, float, float]]) -> float:
+def count_from_graph(graph: Graph, name) -> int:
+    count = 0
+    if name == "BRICK":
+        for node in graph.nodes:
+            module_type = graph.nodes[node]["type"]
+            if module_type in ModuleType.BRICK.name:
+                count += 1
+    elif name == "HINGE":
+        for node in graph.nodes:
+            module_type = graph.nodes[node]["type"]
+            if module_type in ModuleType.HINGE.name:
+                count += 1
+    return count
+def symmetry_score(graph) -> float:
+    """Return [0,1]; 1 = perfectly mirrored around x=0."""
+    try:
+        core = construct_mjspec_from_graph(graph)
+    except Exception:
+        return 0.0
+
+    coords = []
+    for body in core.spec.bodies:
+        if hasattr(body, "pos") and body.pos is not None:
+            coords.append(np.asarray(body.pos, float))
+        for geom in getattr(body, "geoms", []):
+            if hasattr(geom, "pos") and geom.pos is not None:
+                coords.append(np.asarray(geom.pos, float))
+    if not coords:
+        return 0.0
+
+    coords = np.vstack(coords)
+    mirrored = coords.copy()
+    mirrored[:, 0] *= -1
+
+    dists = []
+    for m in mirrored:
+        d = np.sqrt(((coords - m) ** 2).sum(axis=1)).min()
+        dists.append(d)
+    mean_min = float(np.mean(dists))
+
+    scale = np.linalg.norm(coords.max(axis=0) - coords.min(axis=0))
+    if scale <= 1e-9:
+        return 0.0
+
+    return float(np.clip(1.0 - mean_min / scale, 0.0, 1.0))
+
+def stability_penalty(graph, z_min=0.15, weight=3.0) -> float:
+    """Penalty grows if average body height < z_min."""
+    core = construct_mjspec_from_graph(graph)
+    z_positions = [np.asarray(b.pos, float)[2]
+                   for b in core.spec.bodies if hasattr(b, "pos")]
+    if not z_positions:
+        return 0.0
+    return max(0.0, z_min - float(np.mean(z_positions))) * weight
+
+def single_connection_hinge_penalty(g, w_single: float = 0.10) -> float:
+    deg = g.degree
+    bad = sum(1 for n, d in g.nodes(data=True)
+              if d.get("type") == "HINGE" and deg(n) == 1)
+    return w_single * bad
+
+def arch_penalty(graph, base=0.30) -> float:
+    num_blocks = count_from_graph(graph, "BRICK")
+    num_hinges = count_from_graph(graph, "HINGE")
+    if num_hinges == 0:
+        return 1e6
+    ratio_over = max(0.0, num_blocks/num_hinges - 1.0)
+    return base * ratio_over
+
+
+def fitness_function(history: list[tuple[float, float, float]],graph: Graph) -> float:
+    sym_bonus = 0.3 * symmetry_score(graph)            # subtract later (good thing)
+    pen_arch  = arch_penalty(graph, base=0.20)         # add
+    pen_hinge = single_connection_hinge_penalty(graph, w_single=0.10)  # add
+    pen_stab  = stability_penalty(graph, z_min=0.15, weight=0.2)       # add (tuned lower)
+
+    penalty = (pen_arch + pen_hinge + pen_stab) - sym_bonus
+
     xt, yt, zt = TARGET_POSITION
     xc, yc, zc = history[-1]
 
@@ -61,7 +146,7 @@ def fitness_function(history: list[tuple[float, float, float]]) -> float:
     cartesian_distance = np.sqrt(
         (xt - xc) ** 2 + (yt - yc) ** 2 + (zt - zc) ** 2,
     )
-    return -cartesian_distance
+    return cartesian_distance+penalty
 
 
 def nn_controller(
@@ -93,9 +178,10 @@ def nn_controller(
 
 
 def experiment(
+    spawn_pos,
     robot: Any,
     controller: Controller,
-    duration: int = 15,
+    duration: int = 30,
     mode: ViewerTypes = "viewer",
 ) -> None:
     """Run the simulation with random movements."""
@@ -113,7 +199,7 @@ def experiment(
     # Check docstring for spawn conditions
     world.spawn(
         robot.spec,
-        position=SPAWN_POS,
+        position=spawn_pos,
         correct_collision_with_floor=True,
     )
 
@@ -226,34 +312,41 @@ def main() -> None:
     core = construct_mjspec_from_graph(robot_graph)
 
     # ? ------------------------------------------------------------------ #
-    mujoco_type_to_find = mj.mjtObj.mjOBJ_GEOM
-    name_to_bind = "core"
-    tracker = Tracker(
-        mujoco_obj_to_find=mujoco_type_to_find,
-        name_to_bind=name_to_bind,
-    )
+    fitnesses = []
 
-    # ? ------------------------------------------------------------------ #
-    # Simulate the robot
-    ctrl = Controller(
-        controller_callback_function=nn_controller,
-        # controller_callback_function=random_move,
-        tracker=tracker,
-    )
+    for pos in SPAWN_POS:
+        tracker = Tracker(
+            mujoco_obj_to_find=mj.mjtObj.mjOBJ_GEOM,
+            name_to_bind="core",
+        )
+        ctrl = Controller(
+            controller_callback_function=nn_controller,
+            tracker=tracker,
+        )
 
-    experiment(robot=core, controller=ctrl, mode="video")
+        experiment(spawn_pos=pos, robot=core, controller=ctrl, mode="simple")  # Use "simple" for faster evaluation
+
+        # Compute fitness for this spawn position
+        fit = fitness_function(tracker.history["xpos"][0], robot_graph)
+        fitnesses.append(fit)
+
+    # Average fitness
+    average_fitness = float(np.mean(fitnesses))
+    console.log(f"Average fitness over {len(SPAWN_POS)} spawn positions: {average_fitness}")
 
     show_xpos_history(
         tracker.history["xpos"][0],
-        spawn_position=SPAWN_POS,
+        spawn_position=SPAWN_POS[0],
         target_position=TARGET_POSITION,
         save=True,
         show=True,
     )
 
-    fitness = fitness_function(tracker.history["xpos"][0])
-    msg = f"Fitness of generated robot: {fitness}"
-    console.log(msg)
+    print(fitnesses)
+
+    # fitness = fitness_function(tracker.history["xpos"][0], robot_graph)
+    # msg = f"Fitness of generated robot: {fitness}"
+    # console.log(msg)
 
 
 if __name__ == "__main__":
