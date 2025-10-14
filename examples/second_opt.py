@@ -146,7 +146,7 @@ def experiment(robot_graph: Graph, weights) -> np.ndarray:
 
     parametrization = ng.p.Array(shape=(num_params,))
     parametrization.random_state.seed(SEED)
-    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=7000)
+    optimizer = ng.optimizers.CMA(parametrization=num_params, budget=10)
 
     spawn_positions = SPAWN_POS
     def objective(x): 
@@ -203,7 +203,7 @@ def main() -> None:
 
     print(tracker.history["xpos"][0])
     print(fitness)
-    show_xpos_history(tracker.history["xpos"][0], spawn_position=SPAWN_POS, target_position=TARGET_POSITION)
+    show_xpos_history(tracker.history["xpos"][0], spawn_position=SPAWN_POS[0], target_position=TARGET_POSITION)
 
 
 if __name__ == "__main__":
