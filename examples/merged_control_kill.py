@@ -307,7 +307,7 @@ def evaluate(weights, robot_graph, spawn_pos, penalty):
     world = OlympicArena()
     mj.set_mjcb_control(None)
     robot = construct_mjspec_from_graph(robot_graph)
-    world.spawn(robot.spec, spawn_position=spawn_pos)
+    world.spawn(robot.spec, position=spawn_pos)
 
     model = world.spec.compile()
     data = mj.MjData(model)
@@ -360,7 +360,7 @@ def experiment(robot_graph: Any, penalty) -> np.ndarray:
     mj.set_mjcb_control(None)
     robot = construct_mjspec_from_graph(robot_graph)
     world = OlympicArena()
-    world.spawn(robot.spec, spawn_position=SPAWN_POS[0])
+    world.spawn(robot.spec, position=SPAWN_POS[0])
 
     model = world.spec.compile()
     data = mj.MjData(model)
@@ -427,7 +427,7 @@ def is_learning(robot_graph) -> tuple[bool, float, float]:
         print(f"[non-learner] invalid graph during construct: {type(e).__name__}: {e}")
         return (False, 0.0, 0.0)
 
-    world.spawn(robot.spec, spawn_position=SPAWN_POS[0])
+    world.spawn(robot.spec, position=SPAWN_POS[0])
     model = world.spec.compile()
     data = mj.MjData(model)
     mj.mj_resetData(model, data)
@@ -548,7 +548,7 @@ def main() -> None:
     mj.set_mjcb_control(None)
 
     world = OlympicArena()
-    world.spawn(core.spec, spawn_position=SPAWN_POS[0])
+    world.spawn(core.spec, position=SPAWN_POS[0])
     model = world.spec.compile()
     data = mj.MjData(model)
     mj.mj_resetData(model, data)
